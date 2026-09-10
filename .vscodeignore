@@ -1,0 +1,9 @@
+src/**
+docs/**
+tsconfig.json
+node_modules/**
+package-lock.json
+.vscode/**
+.github/**
+.gitignore
+images/extension-page.png

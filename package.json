@@ -1,0 +1,210 @@
+{
+  "name": "devcontainer-runtime-podman",
+  "displayName": "DevContainer runtime support with podman",
+  "description": "Builds and runs the environment declared in devcontainer.json as a rootless podman container inside your Eclipse Che workspace, and opens terminals in it.",
+  "publisher": "rohankanojia",
+  "license": "EPL-2.0",
+  "version": "0.0.1",
+  "preview": true,
+  "engines": {
+    "vscode": "^1.63.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "devcontainer",
+    "podman",
+    "eclipse che",
+    "remote development",
+    "container"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rohanKanojia/devcontainer-runtime-support-via-podman"
+  },
+  "bugs": {
+    "url": "https://github.com/eclipse-che/che/issues/23458"
+  },
+  "capabilities": {
+    "virtualWorkspaces": true,
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "workspaceContains:.devcontainer/devcontainer.json",
+    "workspaceContains:.devcontainer.json"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "che-devcontainer.actions",
+        "title": "Dev Container Actions\u2026",
+        "category": "Dev Container"
+      },
+      {
+        "command": "che-devcontainer.start",
+        "title": "Start Dev Container Environment",
+        "category": "Dev Container"
+      },
+      {
+        "command": "che-devcontainer.openTerminal",
+        "title": "Open Terminal in Dev Container",
+        "category": "Dev Container"
+      },
+      {
+        "command": "che-devcontainer.rebuild",
+        "title": "Rebuild Dev Container",
+        "category": "Dev Container"
+      },
+      {
+        "command": "che-devcontainer.rebuildNoCache",
+        "title": "Rebuild Dev Container (No Cache)",
+        "category": "Dev Container"
+      },
+      {
+        "command": "che-devcontainer.showLog",
+        "title": "Show Dev Container Log",
+        "category": "Dev Container"
+      }
+    ],
+    "terminal": {
+      "profiles": [
+        {
+          "id": "che-devcontainer.terminal",
+          "title": "devcontainer",
+          "icon": "vm"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Dev Container",
+      "properties": {
+        "cheDevcontainer.notify": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a notification when the dev container becomes ready or fails."
+        },
+        "cheDevcontainer.lockPath": {
+          "type": "string",
+          "default": "/tmp/.devcontainer-setup.lock",
+          "description": "Lock file held by the dev container setup script. Must match LOCK_FILE in start-devcontainer.sh."
+        },
+        "cheDevcontainer.containerName": {
+          "type": "string",
+          "default": "devcontainer",
+          "description": "Name of the nested dev container."
+        }
+      }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "che-devcontainer.rebuild",
+          "when": "resourceFilename == devcontainer.json || resourceFilename == .devcontainer.json",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "che-devcontainer.openTerminal",
+          "when": "cheDevcontainer.state == ready"
+        },
+        {
+          "command": "che-devcontainer.rebuild",
+          "when": "cheDevcontainer.state"
+        },
+        {
+          "command": "che-devcontainer.rebuildNoCache",
+          "when": "cheDevcontainer.state"
+        },
+        {
+          "command": "che-devcontainer.showLog",
+          "when": "cheDevcontainer.state"
+        },
+        {
+          "command": "che-devcontainer.actions",
+          "when": "cheDevcontainer.state"
+        },
+        {
+          "command": "che-devcontainer.start",
+          "when": "cheDevcontainer.state != ready"
+        }
+      ]
+    },
+    "walkthroughs": [
+      {
+        "id": "cheDevcontainer",
+        "title": "Work in your dev container",
+        "description": "This repository defines its environment in devcontainer.json. Here is how to use it.",
+        "featuredFor": [
+          ".devcontainer/devcontainer.json",
+          ".devcontainer.json"
+        ],
+        "steps": [
+          {
+            "id": "start",
+            "title": "Build the environment",
+            "description": "This repository declares its environment in devcontainer.json. Building it creates the image and runs it as a container next to the editor.\n[Start Dev Container Environment](command:che-devcontainer.start)",
+            "media": {
+              "markdown": "media/start.md"
+            },
+            "completionEvents": [
+              "onCommand:che-devcontainer.start"
+            ]
+          },
+          {
+            "id": "status",
+            "title": "Watch it build",
+            "description": "The status bar shows the container state. Click it at any time for the full list of actions.\n[Show the log](command:che-devcontainer.showLog)",
+            "media": {
+              "image": "images/status-bar.png",
+              "altText": "Status bar item showing the dev container is ready, with container, image and user"
+            },
+            "completionEvents": [
+              "onCommand:che-devcontainer.showLog"
+            ]
+          },
+          {
+            "id": "terminal",
+            "title": "Open a terminal inside it",
+            "description": "New terminals use the devcontainer profile, so you get the repo's toolchain.\n[Open a terminal](command:che-devcontainer.openTerminal)",
+            "media": {
+              "image": "images/ready-notification.png",
+              "altText": "Notification reading \"Dev container is ready\" with an Open Terminal button"
+            },
+            "completionEvents": [
+              "onCommand:che-devcontainer.openTerminal"
+            ]
+          },
+          {
+            "id": "rebuild",
+            "title": "Rebuild after editing devcontainer.json",
+            "description": "The container is reused between restarts, so changes to devcontainer.json need a rebuild.\n[Rebuild](command:che-devcontainer.rebuild)",
+            "media": {
+              "image": "images/action-menu.png",
+              "altText": "The Dev Container action menu listing open terminal, rebuild, rebuild no-cache and show log"
+            },
+            "completionEvents": [
+              "onCommand:che-devcontainer.rebuild"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "1.63",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.0.0"
+  }
+}

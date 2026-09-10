@@ -1,0 +1,43 @@
+# Devfile template with NO postStart event — the extension drives the lifecycle.
+schemaVersion: 2.2.0
+components:
+  - name: universal-developer-image
+    container:
+      image: quay.io/devfile/universal-developer-image:ubi9-latest
+      mountSources: true
+      memoryLimit: 4Gi
+      memoryRequest: 1Gi
+      cpuLimit: 4000m
+      cpuRequest: 1000m
+commands:
+  - id: start-devcontainer
+    exec:
+      component: universal-developer-image
+      label: Start dev container
+      workingDir: ${PROJECTS_ROOT}
+      commandLine: |
+        bash /tmp/start-devcontainer.sh 2>&1 | tee /tmp/devcontainer.log
+  - id: rebuild-devcontainer
+    exec:
+      component: universal-developer-image
+      label: Rebuild dev container
+      workingDir: ${PROJECTS_ROOT}
+      commandLine: |
+        REBUILD=1 bash /tmp/start-devcontainer.sh 2>&1 | tee /tmp/devcontainer.log
+  - id: rebuild-devcontainer-no-cache
+    exec:
+      component: universal-developer-image
+      label: Rebuild dev container (no cache)
+      workingDir: ${PROJECTS_ROOT}
+      commandLine: |
+        REBUILD=1 NO_CACHE=1 bash /tmp/start-devcontainer.sh 2>&1 | tee /tmp/devcontainer.log
+  - id: show-devcontainer-log
+    exec:
+      component: universal-developer-image
+      label: Show dev container log
+      workingDir: ${PROJECTS_ROOT}
+      commandLine: |
+        touch /tmp/devcontainer.log
+        tail -n 200 -f /tmp/devcontainer.log
+# NOTE: no `events:` block. Nothing runs on workspace start; the extension prompts and the user
+# chooses. This also removes every postStart-hook hazard (readiness blocking, tee pipe, reaping).
