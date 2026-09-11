@@ -34,8 +34,7 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "workspaceContains:.devcontainer/devcontainer.json",
-    "workspaceContains:.devcontainer.json"
+    "onStartupFinished"
   ],
   "contributes": {
     "commands": [
@@ -108,34 +107,34 @@
       "editor/title": [
         {
           "command": "che-devcontainer.rebuild",
-          "when": "resourceFilename == devcontainer.json || resourceFilename == .devcontainer.json",
+          "when": "cheDevcontainer.hasConfiguration && (resourceFilename == devcontainer.json || resourceFilename == .devcontainer.json)",
           "group": "navigation"
         }
       ],
       "commandPalette": [
         {
           "command": "che-devcontainer.openTerminal",
-          "when": "cheDevcontainer.state == ready"
+          "when": "cheDevcontainer.hasConfiguration && cheDevcontainer.state == ready"
         },
         {
           "command": "che-devcontainer.rebuild",
-          "when": "cheDevcontainer.state"
+          "when": "cheDevcontainer.hasConfiguration"
         },
         {
           "command": "che-devcontainer.rebuildNoCache",
-          "when": "cheDevcontainer.state"
+          "when": "cheDevcontainer.hasConfiguration"
         },
         {
           "command": "che-devcontainer.showLog",
-          "when": "cheDevcontainer.state"
+          "when": "cheDevcontainer.hasConfiguration"
         },
         {
           "command": "che-devcontainer.actions",
-          "when": "cheDevcontainer.state"
+          "when": "cheDevcontainer.hasConfiguration"
         },
         {
           "command": "che-devcontainer.start",
-          "when": "cheDevcontainer.state != ready"
+          "when": "cheDevcontainer.hasConfiguration && cheDevcontainer.state != ready"
         }
       ]
     },

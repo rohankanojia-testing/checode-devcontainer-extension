@@ -17,6 +17,22 @@ const TASK_REBUILD_NO_CACHE = 'Rebuild dev container (no cache)';
 const TASK_SHOW_LOG = 'Show dev container log';
 
 let current: Probe | undefined;
+let hasConfiguration = false;
+const CONFIG_GLOB = '{.devcontainer.json,.devcontainer/devcontainer.json,.devcontainer/*/devcontainer.json}';
+
+async function configurationExists(): Promise<boolean> {
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const matches = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, CONFIG_GLOB), null, 1);
+    if (matches.length > 0) return true;
+  }
+  return false;
+}
+
+async function requireConfiguration(): Promise<boolean> {
+  if (await configurationExists()) return true;
+  void vscode.window.showInformationMessage('No devcontainer configuration found in this workspace.');
+  return false;
+}
 let statusBar: vscode.StatusBarItem;
 let lastNotified: Probe['phase'] | undefined;
 
@@ -28,9 +44,12 @@ const BUILD_TASKS = new Set([TASK_START, TASK_REBUILD, TASK_REBUILD_NO_CACHE]);
 const EXIT_UNSUPPORTED_ENVIRONMENT = 78;
 
 function render(state: Probe | undefined): void {
+  if (!hasConfiguration) {
+    statusBar.hide();
+    return;
+  }
   if (!state) {
-    // The extension only activates when devcontainer.json is present, so "not started" is the
-    // honest label here — and it keeps a click target after the prompt is dismissed.
+    // Configuration exists, but setup has not completed.
     statusBar.text = '$(vm-outline) Dev Container: not started';
     statusBar.tooltip = 'No completed setup configuration is available. Click to build the environment.';
     statusBar.command = 'che-devcontainer.actions';
@@ -118,6 +137,7 @@ async function notify(state: Probe): Promise<void> {
 
 /** Run one of the devfile tasks che-commands contributes, by its label. */
 async function runDevfileTask(label: string): Promise<void> {
+  if (!await requireConfiguration()) return;
   const tasks = await vscode.tasks.fetchTasks({ type: 'devfile' });
   const task = tasks.find(t => t.name === label);
   if (!task) {
@@ -133,6 +153,7 @@ interface Action extends vscode.QuickPickItem {
 
 /** The one menu that lists every lifecycle action, so the user never has to know task names. */
 async function showActions(): Promise<void> {
+  if (!await requireConfiguration()) return;
   const ready = current?.phase === 'ready';
   const running = current?.phase === 'ready' || current?.phase === 'building';
   const items: Action[] = [];
@@ -172,7 +193,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.window.registerTerminalProfileProvider('che-devcontainer.terminal', {
-      provideTerminalProfile() {
+      async provideTerminalProfile() {
+        if (!await requireConfiguration()) return undefined;
         if (!current || current.phase !== 'ready' || !current.runtime) {
           vscode.window.showWarningMessage('Dev container is not ready yet.');
           return undefined;
@@ -188,7 +210,8 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('che-devcontainer.openTerminal', () => {
+    vscode.commands.registerCommand('che-devcontainer.openTerminal', async () => {
+      if (!await requireConfiguration()) return;
       if (!current || current.phase !== 'ready' || !current.runtime) {
         vscode.window.showWarningMessage('Dev container is not ready yet.');
         return;
@@ -213,13 +236,28 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Setup resolves terminal configuration; the probe verifies container identity and liveness.
   const cfg = () => vscode.workspace.getConfiguration('cheDevcontainer');
+  let refreshVersion = 0;
   const refresh = async (): Promise<void> => {
+    const version = ++refreshVersion;
+    const found = await configurationExists();
+    if (version !== refreshVersion) return;
+    const added = found && !hasConfiguration;
+    hasConfiguration = found;
+    void vscode.commands.executeCommand('setContext', 'cheDevcontainer.hasConfiguration', found);
+    if (!found) {
+      current = undefined;
+      lastNotified = undefined;
+      void vscode.commands.executeCommand('setContext', 'cheDevcontainer.state', 'noConfiguration');
+      render(undefined);
+      return;
+    }
     const containerName = cfg().get<string>('containerName', 'devcontainer');
     let next = await probe(
       containerName,
       cfg().get<string>('lockPath', '/tmp/.devcontainer-setup.lock'),
       cfg().get<string>('runtimePath', '/tmp/che-devcontainer/runtime.json')
     );
+    if (version !== refreshVersion) return;
     // A build we launched outranks whatever the container currently looks like: during a rebuild
     // the old container is still up, and reporting "ready" then would be a lie.
     if (activeBuilds > 0) {
@@ -232,6 +270,7 @@ export function activate(context: vscode.ExtensionContext): void {
     void vscode.commands.executeCommand('setContext', 'cheDevcontainer.state', current.phase);
     render(current);
     void notify(current);
+    if (added) void offerToStart(context);
   };
 
   // A build we started (or the user started from the task list) is observable through task
@@ -251,7 +290,7 @@ export function activate(context: vscode.ExtensionContext): void {
       void refresh();
     }),
     vscode.tasks.onDidEndTaskProcess(e => {
-      if (BUILD_TASKS.has(e.execution.task.name)) {
+      if (hasConfiguration && BUILD_TASKS.has(e.execution.task.name)) {
         if (e.exitCode !== undefined && e.exitCode !== 0) {
           // 78 (EX_CONFIG) is the setup script's signal that the workspace itself cannot support
           // nested containers — an administrator problem, not a broken build. Saying so is the
@@ -273,12 +312,18 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  const watcher = vscode.workspace.createFileSystemWatcher(`**/${CONFIG_GLOB}`);
+  context.subscriptions.push(
+    watcher,
+    watcher.onDidCreate(() => void refresh()),
+    watcher.onDidDelete(() => void refresh()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => void refresh())
+  );
+
   const timer = setInterval(() => void refresh(), 5000);
   context.subscriptions.push(new vscode.Disposable(() => clearInterval(timer)));
 
-  void refresh(); // pick up a container that was already ready before the window opened
-
-  void refresh().then(() => offerToStart(context));
+  void refresh(); // also detect configuration added after the window opened
 }
 
 const DISMISSED_KEY = 'cheDevcontainer.startPromptDismissed';
@@ -288,6 +333,7 @@ const DISMISSED_KEY = 'cheDevcontainer.startPromptDismissed';
  * than starting a multi-minute build the user did not request.
  */
 async function offerToStart(context: vscode.ExtensionContext): Promise<void> {
+  if (!hasConfiguration || !await configurationExists()) return;
   if (current && current.phase !== 'none') {
     return; // ready, stale, a build in flight, or podman unavailable
   }

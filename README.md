@@ -124,10 +124,12 @@ If `npm` fails with `EACCES` on `~/.npm/_cacache`, the cache has root-owned file
 ### Running it locally
 
 Open the folder in VS Code and press <kbd>F5</kbd> to launch an Extension Development Host. Note
-that the extension only activates when the opened folder contains a `devcontainer.json` — the
-extension's own folder does not, so open a repository that has one, or add `"onStartupFinished"`
-to `activationEvents` while developing. Confirm activation with **Developer: Show Running
-Extensions**.
+that the extension activates after startup to watch for configuration files. Without a
+configuration it hides its status and actions, does not probe containers or prompt to build,
+and refuses explicit devcontainer commands or terminal requests with an explanatory message.
+It detects `.devcontainer.json`, `.devcontainer/devcontainer.json`, and
+`.devcontainer/*/devcontainer.json` in workspace folders, including files added or removed
+while the editor is open. Confirm activation with **Developer: Show Running Extensions**.
 
 ### Installing the VSIX
 
