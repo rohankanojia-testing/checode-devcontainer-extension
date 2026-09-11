@@ -9,7 +9,7 @@
  ***********************************************************************/
 
 import * as vscode from 'vscode';
-import { Probe, podmanPath, probe } from './probe';
+import { Probe, probe, terminalArgs } from './probe';
 
 const TASK_START = 'Start dev container';
 const TASK_REBUILD = 'Rebuild dev container';
@@ -32,7 +32,7 @@ function render(state: Probe | undefined): void {
     // The extension only activates when devcontainer.json is present, so "not started" is the
     // honest label here — and it keeps a click target after the prompt is dismissed.
     statusBar.text = '$(vm-outline) Dev Container: not started';
-    statusBar.tooltip = 'devcontainer.json found. Click to build the environment.';
+    statusBar.tooltip = 'No completed setup configuration is available. Click to build the environment.';
     statusBar.command = 'che-devcontainer.actions';
     statusBar.backgroundColor = undefined;
     statusBar.show();
@@ -73,7 +73,7 @@ function render(state: Probe | undefined): void {
       break;
     case 'none':
       statusBar.text = '$(vm-outline) Dev Container: not started';
-      statusBar.tooltip = 'devcontainer.json found. Click to build the environment.';
+      statusBar.tooltip = 'No completed setup configuration is available. Click to build the environment.';
       statusBar.command = 'che-devcontainer.actions';
       statusBar.backgroundColor = undefined;
       break;
@@ -96,9 +96,9 @@ async function notify(state: Probe): Promise<void> {
   lastNotified = state.phase;
 
   if (state.phase === 'ready') {
-    const open = 'Open Terminal';
+    const open = 'Open Terminal in Dev Container';
     const choice = await vscode.window.showInformationMessage(
-      'Dev container is ready. Terminals open inside it by default.',
+      'Dev container is ready. Use Open Terminal in Dev Container to access it.',
       open
     );
     if (choice === open) {
@@ -114,18 +114,6 @@ async function notify(state: Probe): Promise<void> {
       await vscode.commands.executeCommand('che-devcontainer.rebuild');
     }
   }
-}
-
-function execArgs(state: Probe): string[] {
-  const args = ['exec', '-it'];
-  if (state.remoteUser) {
-    args.push('-u', state.remoteUser);
-  }
-  if (state.workspaceFolder) {
-    args.push('-w', state.workspaceFolder);
-  }
-  args.push(state.containerName, 'bash');
-  return args;
 }
 
 /** Run one of the devfile tasks che-commands contributes, by its label. */
@@ -185,14 +173,14 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.window.registerTerminalProfileProvider('che-devcontainer.terminal', {
       provideTerminalProfile() {
-        if (!current || current.phase !== 'ready') {
+        if (!current || current.phase !== 'ready' || !current.runtime) {
           vscode.window.showWarningMessage('Dev container is not ready yet.');
           return undefined;
         }
         return new vscode.TerminalProfile({
           name: 'devcontainer',
-          shellPath: podmanPath(),
-          shellArgs: execArgs(current),
+          shellPath: current.runtime.podmanPath,
+          shellArgs: terminalArgs(current.runtime),
           iconPath: new vscode.ThemeIcon('vm'),
         });
       },
@@ -201,15 +189,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('che-devcontainer.openTerminal', () => {
-      if (!current || current.phase !== 'ready') {
+      if (!current || current.phase !== 'ready' || !current.runtime) {
         vscode.window.showWarningMessage('Dev container is not ready yet.');
         return;
       }
       vscode.window
         .createTerminal({
           name: 'devcontainer',
-          shellPath: podmanPath(),
-          shellArgs: execArgs(current),
+          shellPath: current.runtime.podmanPath,
+          shellArgs: terminalArgs(current.runtime),
           iconPath: new vscode.ThemeIcon('vm'),
         })
         .show();
@@ -223,14 +211,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('che-devcontainer.showLog', () => runDevfileTask(TASK_SHOW_LOG))
   );
 
-  // No state file: everything is derived from the container itself plus the lock file the
-  // script already holds for mutual exclusion. Nothing has to be kept in sync.
+  // Setup resolves terminal configuration; the probe verifies container identity and liveness.
   const cfg = () => vscode.workspace.getConfiguration('cheDevcontainer');
   const refresh = async (): Promise<void> => {
     const containerName = cfg().get<string>('containerName', 'devcontainer');
     let next = await probe(
       containerName,
-      cfg().get<string>('lockPath', '/tmp/.devcontainer-setup.lock')
+      cfg().get<string>('lockPath', '/tmp/.devcontainer-setup.lock'),
+      cfg().get<string>('runtimePath', '/tmp/che-devcontainer/runtime.json')
     );
     // A build we launched outranks whatever the container currently looks like: during a rebuild
     // the old container is still up, and reporting "ready" then would be a lie.
@@ -323,5 +311,5 @@ async function offerToStart(context: vscode.ExtensionContext): Promise<void> {
 }
 
 export function deactivate(): void {
-  // fs.unwatchFile runs through the disposable registered above.
+  // Timers and UI registrations are disposed through context.subscriptions.
 }

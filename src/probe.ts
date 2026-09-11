@@ -23,39 +23,48 @@ export interface Probe {
   remoteUser?: string;
   workspaceFolder?: string;
   fingerprint?: string;
+  runtime?: RuntimeDescription;
 }
 
-/** One entry of the devcontainer.metadata image label, which is an ARRAY of partial configs. */
-interface MetadataEntry {
-  remoteUser?: string;
-  containerUser?: string;
-  workspaceFolder?: string;
+/** Published atomically by setup after successful lifecycle execution. */
+export interface RuntimeDescription {
+  version: 1;
+  containerName: string;
+  containerId: string;
+  podmanPath: string;
+  image: string;
+  remoteUser: string;
+  workspaceFolder: string;
+  shell: string;
+  remoteEnv: Record<string, string>;
+  fingerprint: string;
 }
 
-/**
- * Merge the metadata array the way the spec (and start-devcontainer.sh) does: last non-null wins.
- */
-export function mergeMetadata(raw: string): MetadataEntry {
-  let entries: MetadataEntry[];
+export function readRuntime(path: string): RuntimeDescription | undefined {
   try {
-    const parsed: unknown = JSON.parse(raw);
-    entries = Array.isArray(parsed) ? (parsed as MetadataEntry[]) : [parsed as MetadataEntry];
-  } catch {
-    return {};
-  }
-  const last = <K extends keyof MetadataEntry>(key: K): MetadataEntry[K] => {
-    let value: MetadataEntry[K] | undefined = undefined;
-    for (const e of entries) {
-      if (e && e[key] !== undefined && e[key] !== null) {
-        value = e[key];
-      }
+    const value = JSON.parse(fs.readFileSync(path, 'utf8'));
+    if (!value || value.version !== 1) return undefined;
+    for (const key of ['containerName', 'containerId', 'podmanPath', 'image', 'workspaceFolder', 'shell', 'fingerprint']) {
+      if (typeof value[key] !== 'string' || !value[key] || value[key].includes('\0')) return undefined;
     }
-    return value;
-  };
-  return {
-    remoteUser: last('remoteUser') ?? last('containerUser'),
-    workspaceFolder: last('workspaceFolder'),
-  };
+    if (typeof value.remoteUser !== 'string' || value.remoteUser.includes('\0')) return undefined;
+    if (!value.remoteEnv || typeof value.remoteEnv !== 'object' || Array.isArray(value.remoteEnv)) return undefined;
+    for (const [key, entry] of Object.entries(value.remoteEnv)) {
+      if (!key || /[=\0]/.test(key) || typeof entry !== 'string' || entry.includes('\0')) return undefined;
+    }
+    return value as RuntimeDescription;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Keep arguments separate, including environment values containing shell syntax. */
+export function terminalArgs(runtime: RuntimeDescription): string[] {
+  const args = ['exec', '-it'];
+  if (runtime.remoteUser) args.push('-u', runtime.remoteUser);
+  for (const [key, value] of Object.entries(runtime.remoteEnv)) args.push('-e', `${key}=${value}`);
+  args.push('-w', runtime.workspaceFolder, runtime.containerName, runtime.shell);
+  return args;
 }
 
 /**
@@ -81,58 +90,36 @@ export function buildInFlight(lockPath: string): boolean {
   }
 }
 
-export function podmanPath(): string {
-  return process.env.ORIGINAL_PODMAN_PATH || '/usr/bin/podman.orig';
-}
-
-/**
- * Derive everything from the container itself — no cooperation from the script required.
- * `devcontainer.metadata` is written by `devcontainer build`; `che.devcontainer.config` is the
- * config fingerprint start-devcontainer.sh stamps on so staleness is detectable.
- */
+/** Setup resolves terminal values; inspect verifies identity and liveness. */
 export async function probe(
   containerName: string,
   lockPath: string,
+  runtimePath = '/tmp/che-devcontainer/runtime.json',
   expectedFingerprint?: string
 ): Promise<Probe> {
-  if (buildInFlight(lockPath)) {
-    return { phase: 'building', containerName };
-  }
-  let stdout: string;
+  if (buildInFlight(lockPath)) return { phase: 'building', containerName };
+  const runtime = readRuntime(runtimePath);
+  if (!runtime) return { phase: 'none', containerName };
+  containerName = runtime.containerName;
   try {
-    ({ stdout } = await run(podmanPath(), ['inspect', '--format', 'json', containerName]));
-  } catch (err) {
-    // ENOENT means the podman binary is absent — a different situation from "no such container",
-    // and one where offering to build would be pointless.
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
-      return { phase: 'unavailable', containerName };
+    const { stdout } = await run(runtime.podmanPath, ['inspect', '--format', 'json', containerName], { timeout: 10000 });
+    const inspected = JSON.parse(stdout);
+    const container = Array.isArray(inspected) ? inspected[0] : undefined;
+    if (!container || container.State?.Running !== true || container.Id !== runtime.containerId) {
+      return { phase: 'none', containerName };
     }
-    return { phase: 'none', containerName };
+    if (buildInFlight(lockPath)) return { phase: 'building', containerName };
+    if (JSON.stringify(readRuntime(runtimePath)) !== JSON.stringify(runtime)) return { phase: 'none', containerName };
+    return {
+      phase: expectedFingerprint !== undefined && runtime.fingerprint !== expectedFingerprint ? 'stale' : 'ready',
+      containerName,
+      image: runtime.image,
+      remoteUser: runtime.remoteUser,
+      workspaceFolder: runtime.workspaceFolder,
+      fingerprint: runtime.fingerprint,
+      runtime,
+    };
+  } catch (err) {
+    return { phase: (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'unavailable' : 'none', containerName };
   }
-  let inspected: Array<{
-    Config?: { Labels?: Record<string, string>; Image?: string };
-    Image?: string;
-    State?: { Running?: boolean };
-  }>;
-  try {
-    inspected = JSON.parse(stdout);
-  } catch {
-    return { phase: 'none', containerName };
-  }
-  const c = inspected[0];
-  if (!c || c.State?.Running !== true) {
-    return { phase: 'none', containerName };
-  }
-  const labels = c.Config?.Labels ?? {};
-  const meta = mergeMetadata(labels['devcontainer.metadata'] ?? '');
-  const fingerprint = labels['che.devcontainer.config'];
-  const stale = expectedFingerprint !== undefined && fingerprint !== expectedFingerprint;
-  return {
-    phase: stale ? 'stale' : 'ready',
-    containerName,
-    image: c.Config?.Image ?? c.Image,
-    remoteUser: meta.remoteUser,
-    workspaceFolder: meta.workspaceFolder,
-    fingerprint,
-  };
 }

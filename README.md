@@ -29,12 +29,12 @@ The extension owns **no devcontainer logic**. `start-devcontainer.sh` in the wor
 engine — it resolves the config, builds the image, runs lifecycle commands and starts the
 container. This extension is the UI over it:
 
-- derives container state from `podman inspect` — the `devcontainer.metadata` and
-  `che.devcontainer.config` labels — plus VS Code task events for builds in flight
+- reads resolved terminal configuration from the setup runtime description and verifies its
+  container ID and running state with `podman inspect`; task events track builds in flight
 - renders a status bar item (`building` / `ready` / `failed`)
 - notifies on transition, with **Open Terminal** / **Show Log**
-- registers a `devcontainer` terminal profile, replacing the machine-settings JSON that the script
-  had to write because `terminal.integrated.profiles.*` is `restricted: true`
+- provides **Open Terminal in Dev Container** and an explicitly selectable `devcontainer`
+  profile; regular new terminals remain in the outer workspace container
 - runs the existing devfile tasks for rebuild and log, rather than reimplementing them
 
 Keeping the engine in the script keeps the che-code diff small and lets the script stay
@@ -44,15 +44,17 @@ independently testable.
 
 | Question | Source |
 | --- | --- |
-| Ready, and with which user and folder? | `podman inspect` → `devcontainer.metadata` label (merged last-wins) |
+| Ready, and with which user and folder? | Setup runtime JSON plus container ID/running-state verification |
 | Stale against `devcontainer.json`? | `che.devcontainer.config` fingerprint label |
 | Build running, started here? | `onDidStartTask` / `onDidEndTask` |
 | Build running, started elsewhere? | PID in the setup script's lock file |
 | Build failed? | task exit code |
 
-There is no state file. The only optional cooperation from the script is one line —
-`echo $$ >&9` inside its existing `flock` block — which lets the extension notice a build that
-was already running before the window opened.
+Setup publishes a private, atomic runtime description after success and removes it before the
+next setup attempt. It supplies the engine, container ID/name, user, working directory, shell,
+and resolved environment, so the extension does not reimplement config resolution. See
+[the integration contract](docs/script-integration.md). The setup lock's owner PID lets the
+extension detect builds started before the window opened.
 
 ## What it replaces
 
@@ -72,7 +74,10 @@ was already running before the window opened.
 
 When the container finishes building, the extension says so and offers a terminal inside it:
 
-![Notification reading "Dev container is ready. Terminals open inside it by default." with an Open Terminal button](images/ready-notification.png)
+> Dev container is ready. Use Open Terminal in Dev Container to access it.
+
+The **Open Terminal in Dev Container** button opens the resolved environment. Regular new
+terminals keep the workspace default.
 
 The status bar shows the current container; hovering gives the image and the user you will be:
 
@@ -88,7 +93,7 @@ Clicking it opens the action menu — everything in one place, no task names to 
 | --- | --- |
 | `src/` | extension source |
 | `media/` | walkthrough content |
-| `docs/script-integration.md` | the one-line contract with `start-devcontainer.sh` |
+| `docs/script-integration.md` | runtime and lock contract with `start-devcontainer.sh` |
 | `docs/devfile-template.yaml` | devfile with commands and no `postStart` event |
 
 ## Build
@@ -134,7 +139,7 @@ workspace you can build it in place — UDI has Node — rather than transferrin
 `.github/workflows/build.yaml` runs on pushes to `main`, on pull requests, and on `v*` tags:
 
 - `npm ci` — reproducible install, which is why `package-lock.json` is committed
-- `npm run compile` — type-check under `strict`; the build fails on any type error
+- `npm test` — type-check under `strict` and verify runtime validation and terminal arguments
 - `npx vsce package` — also verifies the manifest, and fails if `@types/vscode` is newer than
   `engines.vscode`
 - the VSIX is uploaded as a build artifact

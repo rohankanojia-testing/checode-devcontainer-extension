@@ -1,20 +1,42 @@
-# Script change required: one line
+# Setup / extension contract
 
-In `start-devcontainer.sh`, the existing lock block gains a single line so the extension can
-tell whether a build is in flight — including after an OOMKill, where no cleanup trap runs.
+The setup script owns config resolution and container creation. The extension owns terminal UI.
 
-```bash
-LOCK_FILE="${LOCK_FILE:-/tmp/.devcontainer-setup.lock}"
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  echo "another devcontainer setup is in progress; waiting..."
-  flock -w 900 9 || { echo "timed out waiting for the in-progress setup" >&2; exit 1; }
-fi
-echo $$ >&9          # <-- ADD THIS: publish the holder's PID into the locked file
+After acquiring the setup lock, remove the old runtime description before running setup. Only
+publish a new description after setup succeeds and the target container is running. Write JSON
+to a temporary file in the same directory with mode 0600, then atomically rename it.
+
+Default path: `/tmp/che-devcontainer/runtime.json`. The script override
+`CHE_DEVCONTAINER_RUNTIME` must match the extension setting `cheDevcontainer.runtimePath`.
+The parent directory is created with mode 0700. Keep the file outside the repository:
+`remoteEnv` can include credentials, and its contents must not be logged.
+
+```json
+{
+  "version": 1,
+  "containerName": "devcontainer",
+  "containerId": "full-podman-container-id",
+  "podmanPath": "/usr/bin/podman.orig",
+  "image": "localhost/devcontainer:latest",
+  "remoteUser": "node",
+  "workspaceFolder": "/workspace",
+  "shell": "bash",
+  "remoteEnv": {},
+  "fingerprint": "resolved-config-fingerprint"
+}
 ```
 
-That is the entire contract. No state file, no `write_state`, nothing to keep in sync.
+These are the script's resolved values, including the detected shell fallback and environment
+passed to lifecycle commands. An empty remoteUser means use the container's default user.
+The extension validates the description, inspects the container using its recorded engine, and
+requires the same container ID and running state. Missing, malformed, or obsolete descriptions
+never enable a terminal. Both the command and the contributed profile use one argument builder.
+Regular editor terminals keep their existing default; setup must not set terminal profiles.
 
-The path must match `cheDevcontainer.lockPath` (default `/tmp/.devcontainer-setup.lock`). Keep
-`LOCK_FILE` as the override on the script side and the setting on the extension side; do not
-hardcode the literal twice.
+The setup parent also publishes its PID in `/tmp/.devcontainer-setup.lock` after acquiring flock.
+It must not truncate the previous PID while waiting, and children must not inherit the lock fd.
+Clear the PID before releasing the lock. `LOCK_FILE` must match `cheDevcontainer.lockPath`.
+
+Upgrade both setup and extension together and rerun setup to publish the description. Older
+workspaces with a script-generated default terminal profile need that old machine setting
+removed (or a fresh workspace); this extension does not rewrite user terminal preferences.
