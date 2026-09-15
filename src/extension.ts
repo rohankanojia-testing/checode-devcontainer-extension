@@ -75,6 +75,23 @@ async function requireConfiguration(): Promise<boolean> {
 
 let statusBar: vscode.StatusBarItem;
 let lastNotified: Probe['phase'] | undefined;
+/** Config fingerprint the stale warning was last shown for, so a rebuild does not re-warn. */
+let lastStaleWarning: string | undefined;
+
+/**
+ * Terminals attached to the dev container. A rebuild runs `podman rm -f`, which SIGKILLs every
+ * process in the container — including the `podman exec` behind each of these — and the editor
+ * then reports "terminated with exit code: 137". Closing them first makes the teardown ours
+ * rather than a crash the user has to interpret.
+ */
+const containerTerminals = new Set<vscode.Terminal>();
+
+function closeContainerTerminals(): void {
+  for (const terminal of containerTerminals) {
+    terminal.dispose();
+  }
+  containerTerminals.clear();
+}
 
 /** Build tasks this window has running. Makes `building` work without any script cooperation. */
 let activeBuilds = 0;
@@ -83,6 +100,22 @@ const BUILD_TASKS = new Set([TASK_START, TASK_REBUILD, TASK_REBUILD_NO_CACHE]);
 /** EX_CONFIG from start-devcontainer.sh: the environment cannot support nested containers. */
 const EXIT_UNSUPPORTED_ENVIRONMENT = 78;
 
+/**
+ * Status bar backgrounds are restricted to these two theme colours — `extHostStatusBar.ts` keeps
+ * an allow-list and silently drops anything else, so no third colour is available.
+ */
+const WARNING_BACKGROUND = new vscode.ThemeColor('statusBarItem.warningBackground');
+const ERROR_BACKGROUND = new vscode.ThemeColor('statusBarItem.errorBackground');
+
+/** One place for the words shown to users, so the status bar and the action menu agree. */
+const PHASE_LABELS: Record<Probe['phase'], string> = {
+  none: 'Not started',
+  building: 'Building',
+  ready: 'Ready',
+  stale: 'Config changed',
+  unavailable: 'Unavailable',
+};
+
 function render(state: Probe | undefined): void {
   if (!hasConfiguration) {
     statusBar.hide();
@@ -90,22 +123,27 @@ function render(state: Probe | undefined): void {
   }
   if (!state) {
     // Configuration exists, but setup has not completed.
-    statusBar.text = '$(vm-outline) Dev Container: not started';
+    statusBar.text = '$(vm-outline) Dev Container: Not started';
     statusBar.tooltip = 'No completed setup configuration is available. Click to build the environment.';
     statusBar.command = 'che-devcontainer.actions';
     statusBar.backgroundColor = undefined;
+    statusBar.color = undefined;
     statusBar.show();
     return;
   }
   switch (state.phase) {
     case 'building':
-      statusBar.text = '$(sync~spin) Dev Container: building';
+      statusBar.text = '$(sync~spin) Dev Container: Building';
       statusBar.tooltip = 'Building from devcontainer.json';
       statusBar.command = 'che-devcontainer.showLog';
-      statusBar.backgroundColor = undefined;
+      // Only `statusBarItem.errorBackground` and `statusBarItem.warningBackground` are honoured
+      // as status bar backgrounds; warning is the yellow one.
+      statusBar.backgroundColor = WARNING_BACKGROUND;
+      statusBar.color = undefined;
       break;
     case 'ready':
-      statusBar.text = `$(vm-active) Dev Container${state.image ? ': ' + shortImage(state.image) : ''}`;
+      // The state, not the image name — the image is in the tooltip where it belongs.
+      statusBar.text = '$(pass-filled) Dev Container: Ready';
       statusBar.tooltip = new vscode.MarkdownString(
         [
           `**Dev container ready**`,
@@ -116,38 +154,51 @@ function render(state: Probe | undefined): void {
         ].join('\n')
       );
       statusBar.command = 'che-devcontainer.actions';
+      // Default styling: ready is the steady state, so it stays quiet. Colour is reserved for
+      // states that want attention (building, config changed, unavailable).
       statusBar.backgroundColor = undefined;
+      statusBar.color = undefined;
       break;
     case 'stale':
-      statusBar.text = '$(warning) Dev Container: config changed';
+      statusBar.text = '$(warning) Dev Container: Config changed';
       statusBar.tooltip = 'devcontainer.json changed since this container was built. Rebuild to apply.';
       statusBar.command = 'che-devcontainer.actions';
-      statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+      statusBar.backgroundColor = WARNING_BACKGROUND;
+      statusBar.color = undefined;
       break;
     case 'unavailable':
-      statusBar.text = '$(circle-slash) Dev Container: unavailable';
+      statusBar.text = '$(circle-slash) Dev Container: Unavailable';
       statusBar.tooltip = 'podman was not found in this workspace, so the environment cannot be built.';
       statusBar.command = 'che-devcontainer.showLog';
-      statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+      statusBar.backgroundColor = ERROR_BACKGROUND;
+      statusBar.color = undefined;
       break;
     case 'none':
-      statusBar.text = '$(vm-outline) Dev Container: not started';
+      statusBar.text = '$(vm-outline) Dev Container: Not started';
       statusBar.tooltip = 'No completed setup configuration is available. Click to build the environment.';
       statusBar.command = 'che-devcontainer.actions';
       statusBar.backgroundColor = undefined;
+      statusBar.color = undefined;
       break;
   }
   statusBar.show();
 }
 
-function shortImage(image: string): string {
-  const withoutRegistry = image.includes('/') ? image.slice(image.lastIndexOf('/') + 1) : image;
-  return withoutRegistry.split(':')[0];
-}
 
 async function notify(state: Probe): Promise<void> {
   if (!vscode.workspace.getConfiguration('cheDevcontainer').get<boolean>('notify', true)) {
     return;
+  }
+  if (state.phase === 'stale') {
+    // Warn once per config content. Rebuilding does not change devcontainer.json, so a rebuild
+    // must not produce another warning — only a further edit should.
+    if (lastStaleWarning === (state.expected ?? '')) {
+      lastNotified = state.phase;
+      return;
+    }
+    lastStaleWarning = state.expected ?? '';
+  } else if (state.phase === 'ready') {
+    lastStaleWarning = undefined; // a matching build re-arms the warning for the next edit
   }
   if (state.phase === lastNotified) {
     return; // only on transition
@@ -219,7 +270,7 @@ async function showActions(): Promise<void> {
     { label: '$(output) Show Dev Container Log', command: 'che-devcontainer.showLog' }
   );
   const picked = await vscode.window.showQuickPick(items, {
-    title: `Dev Container: ${current?.phase ?? 'not started'}`,
+    title: `Dev Container: ${PHASE_LABELS[current?.phase ?? 'none']}`,
     placeHolder: 'Select an action',
   });
   if (picked) {
@@ -258,14 +309,14 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showWarningMessage('Dev container is not ready yet.');
         return;
       }
-      vscode.window
-        .createTerminal({
-          name: 'devcontainer',
-          shellPath: state.runtime.podmanPath,
-          shellArgs: terminalArgs(state.runtime),
-          iconPath: new vscode.ThemeIcon('vm'),
-        })
-        .show();
+      const terminal = vscode.window.createTerminal({
+        name: 'devcontainer',
+        shellPath: state.runtime.podmanPath,
+        shellArgs: terminalArgs(state.runtime),
+        iconPath: new vscode.ThemeIcon('vm'),
+      });
+      containerTerminals.add(terminal);
+      terminal.show();
     }),
     vscode.commands.registerCommand('che-devcontainer.actions', () => showActions()),
     vscode.commands.registerCommand('che-devcontainer.start', () => runDevfileTask(TASK_START)),
@@ -324,9 +375,17 @@ export function activate(context: vscode.ExtensionContext): void {
   // A build we started (or the user started from the task list) is observable through task
   // events, so the poll is only a slow backstop for anything started elsewhere.
   context.subscriptions.push(
+    vscode.window.onDidOpenTerminal(t => {
+      // The terminal profile creates terminals we never see a handle for at creation time.
+      if (t.name === 'devcontainer') containerTerminals.add(t);
+    }),
+    vscode.window.onDidCloseTerminal(t => containerTerminals.delete(t)),
     vscode.tasks.onDidStartTask(e => {
       if (BUILD_TASKS.has(e.execution.task.name)) {
         activeBuilds++;
+        // Rebuild removes the container with `podman rm -f`; terminals attached to it would
+        // otherwise die with exit code 137 and surface as an error the user must decode.
+        if (e.execution.task.name !== TASK_START) closeContainerTerminals();
       }
       void refresh();
     }),
@@ -400,6 +459,9 @@ async function offerToStart(context: vscode.ExtensionContext): Promise<void> {
     await context.workspaceState.update(DISMISSED_KEY, true);
   }
 }
+
+/** Exposed for tests: render a phase and let the caller inspect the status bar item. */
+export const __renderForTest = (state: Probe | undefined): void => render(state);
 
 export function deactivate(): void {
   // Timers and UI registrations are disposed through context.subscriptions.

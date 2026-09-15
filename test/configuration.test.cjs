@@ -7,6 +7,8 @@ test('configuration presence gates UI, probing and explicit actions across file 
   let probes = 0;
   let taskFetches = 0;
   let profile;
+  let terminalOpened, terminalClosed, taskStarted;
+  const disposedTerminals = [];
   let create;
   let remove;
   let foldersChanged;
@@ -22,9 +24,12 @@ test('configuration presence gates UI, probing and explicit actions across file 
       return new Disposable(() => { for (const item of items) item?.dispose?.(); });
     }
   }
-  const status = { visible: false, show() { this.visible = true; }, hide() { this.visible = false; }, dispose() {} };
+  const status = { visible: false, text: '', color: undefined, backgroundColor: undefined,
+    show() { this.visible = true; }, hide() { this.visible = false; }, dispose() {} };
   const vscode = {
     StatusBarAlignment: { Left: 1 },
+    ThemeColor: class { constructor(id) { this.id = id; } },
+    MarkdownString: class { constructor(value) { this.value = value; } },
     RelativePattern: class { constructor(folder, pattern) { this.base = folder; this.pattern = pattern; } },
     ThemeIcon: class {},
     Disposable,
@@ -46,6 +51,9 @@ test('configuration presence gates UI, probing and explicit actions across file 
       registerTerminalProfileProvider: (_id, provider) => { profile = provider; return disposable; },
       showInformationMessage: async message => { messages.push(message); },
       showWarningMessage: async message => { messages.push(message); },
+      createTerminal: options => ({ ...options, show() {}, dispose() { disposedTerminals.push(this.name); } }),
+      onDidOpenTerminal: cb => { terminalOpened = cb; return disposable; },
+      onDidCloseTerminal: cb => { terminalClosed = cb; return disposable; },
     },
     commands: {
       registerCommand: (id, cb) => { commands.set(id, cb); return disposable; },
@@ -56,7 +64,7 @@ test('configuration presence gates UI, probing and explicit actions across file 
     },
     tasks: {
       fetchTasks: async () => { taskFetches++; return []; },
-      onDidStartTask: () => disposable,
+      onDidStartTask: cb => { taskStarted = cb; return disposable; },
       onDidEndTask: () => disposable,
       onDidEndTaskProcess: () => disposable,
     },
@@ -119,5 +127,48 @@ test('configuration presence gates UI, probing and explicit actions across file 
       '**/.devcontainer/devcontainer.json',
       '**/.devcontainer/*/devcontainer.json',
     ]);
+
+    // A rebuild runs `podman rm -f`, SIGKILLing the exec sessions behind any attached terminal.
+    // The extension closes them first so the user never sees "terminated with exit code: 137".
+    const open = name => { const t = vscode.window.createTerminal({ name }); terminalOpened(t); return t; };
+    open('devcontainer');
+    open('devcontainer');
+    open('bash');                       // not ours; must survive
+    taskStarted({ execution: { task: { name: 'Rebuild dev container' } } });
+    assert.deepEqual(disposedTerminals, ['devcontainer', 'devcontainer']);
+
+    // The first build destroys nothing, so terminals stay open.
+    disposedTerminals.length = 0;
+    open('devcontainer');
+    taskStarted({ execution: { task: { name: 'Start dev container' } } });
+    assert.deepEqual(disposedTerminals, []);
+
+    // Status bar wording and colour per state. Only warning/error backgrounds exist, and ready
+    // deliberately uses neither — colour is reserved for states that want attention.
+    // render() hides everything unless a configuration is present, and an earlier step emptied
+    // workspaceFolders — restore both before exercising the status bar.
+    vscode.workspace.workspaceFolders = [{ uri: 'workspace' }];
+    present = true;
+    foldersChanged();
+    await flush();
+    const render = extension.__renderForTest ?? null;
+    if (render) {
+      const seen = phase => { render(phase === 'none' ? undefined : { phase, containerName: 'devcontainer' });
+        return { text: status.text, color: status.color?.id, background: status.backgroundColor?.id }; };
+      assert.match(seen('ready').text, /Dev Container: Ready$/);
+      assert.equal(seen('ready').color, undefined);      // steady state stays unstyled
+      assert.equal(seen('ready').background, undefined);
+      assert.match(seen('building').text, /Dev Container: Building$/);
+      assert.equal(seen('building').background, 'statusBarItem.warningBackground');
+      assert.match(seen('stale').text, /Dev Container: Config changed$/);
+      assert.equal(seen('stale').background, 'statusBarItem.warningBackground');
+      assert.equal(seen('unavailable').background, 'statusBarItem.errorBackground');
+    }
+
+    // A terminal the user closed is forgotten rather than disposed twice.
+    const closed = open('devcontainer');
+    terminalClosed(closed);
+    taskStarted({ execution: { task: { name: 'Rebuild dev container' } } });
+    assert.deepEqual(disposedTerminals, ['devcontainer']);
   } finally { for (const subscription of subscriptions) subscription.dispose(); }
 });

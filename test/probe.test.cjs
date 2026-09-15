@@ -77,8 +77,22 @@ test('runtime description gates readiness on schema, successful publication and 
     assert.equal(ready.phase, 'ready');
     assert.deepEqual(ready.runtime, runtime);
     assert.equal(ready.containerName, 'custom');
+    // A fingerprint the CALLER discovered is not evidence: without configPath the two sides may
+    // simply have hashed different files, and a running container must not be labelled stale.
     assert.equal((await check('fp')).phase, 'ready');
-    assert.equal((await check('other')).phase, 'stale');
+    assert.equal((await check('other')).phase, 'ready');
+
+    // With configPath recorded, staleness is provable and is reported.
+    const cfgFile = path.join(dir, 'devcontainer.json');
+    fs.writeFileSync(cfgFile, '{"image":"alpine"}');
+    const hashOf = f => createHash('sha256').update(fs.readFileSync(f, 'utf8'), 'utf8').digest('hex');
+    publish({ ...runtime, configPath: cfgFile, fingerprint: hashOf(cfgFile) });
+    assert.equal((await check()).phase, 'ready');
+    fs.writeFileSync(cfgFile, '{"image":"alpine:3.20"}');   // edited after the build
+    assert.equal((await check()).phase, 'stale');
+    fs.rmSync(cfgFile);                                      // recorded file gone -> cannot prove
+    assert.equal((await check()).phase, 'ready');
+    publish(runtime);
     publish({ ...runtime, podmanPath: path.join(dir, 'missing-podman') });
     assert.equal((await check()).phase, 'unavailable');
     publish(runtime);
@@ -93,4 +107,41 @@ test('runtime description gates readiness on schema, successful publication and 
     fs.unlinkSync(runtimePath);
     assert.equal((await check()).phase, 'none');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('configPath in the runtime description decides staleness, not the caller discovery order', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-fp-'));
+  const configPath = path.join(dir, 'devcontainer.json');
+  fs.writeFileSync(configPath, '{"image":"alpine"}');
+  const other = path.join(dir, 'other.json');
+  fs.writeFileSync(other, '{"image":"something-else"}');
+
+  const hashOf = p => createHash('sha256').update(fs.readFileSync(p, 'utf8'), 'utf8').digest('hex');
+
+  const runtimePath = path.join(dir, 'runtime.json');
+  const write = extra => fs.writeFileSync(runtimePath, JSON.stringify({
+    version: 1, containerName: 'devcontainer', containerId: 'abc', podmanPath: '/bin/true',
+    image: 'localhost/devcontainer:latest', remoteUser: 'node', workspaceFolder: '/w',
+    shell: 'bash', remoteEnv: {}, ...extra,
+  }));
+
+  // the description records the file it hashed, and it still matches -> ready, even though the
+  // caller passes the fingerprint of a completely different file
+  write({ fingerprint: hashOf(configPath), configPath });
+  assert.equal(readRuntime(runtimePath).configPath, configPath);
+  assert.equal(fingerprintFromFiles([configPath]), hashOf(configPath));
+
+  // edit the recorded file -> the recorded fingerprint no longer matches it
+  fs.writeFileSync(configPath, '{"image":"alpine:3.20"}');
+  assert.notEqual(fingerprintFromFiles([configPath]), hashOf(other));
+
+  // a description without configPath is still accepted (older setup scripts)
+  write({ fingerprint: 'abc' });
+  assert.equal(readRuntime(runtimePath).configPath, undefined);
+
+  // a malformed configPath invalidates the whole description rather than being ignored
+  write({ fingerprint: 'abc', configPath: '' });
+  assert.equal(readRuntime(runtimePath), undefined);
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });

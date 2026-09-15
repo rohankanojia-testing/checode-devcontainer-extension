@@ -22,7 +22,8 @@ The parent directory is created with mode 0700. Keep the file outside the reposi
   "workspaceFolder": "/workspace",
   "shell": "bash",
   "remoteEnv": {},
-  "fingerprint": "lowercase-hex-sha256-of-the-resolved-config-file"
+  "fingerprint": "lowercase-hex-sha256-of-the-config-file",
+  "configPath": "/projects/example/.devcontainer/devcontainer.json"
 }
 ```
 
@@ -33,11 +34,19 @@ Discovery order (first readable file wins; both sides must use the same file):
 2. `.devcontainer/devcontainer.json`
 3. `.devcontainer/*/devcontainer.json` (sorted by absolute path)
 
-In the setup script this is `sha256sum "$CONFIG_FILE" | cut -d' ' -f1` after resolving
-`CONFIG_FILE` with that order. The extension hashes the same file on each refresh; a mismatch
-is **stale** (container still running, config changed since it was built). Upgrade setup and
-extension together so the algorithm matches — an older script that published a different
-fingerprint will look permanently stale.
+In the setup script this is `sha256sum "$CONFIG_FILE" | cut -d' ' -f1` — the **raw bytes of the
+config file**, not the resolved configuration from `devcontainer read-configuration`. Hashing the
+resolved config instead makes every freshly built container look permanently stale.
+
+`configPath` is the absolute path of that same file, and it is what makes staleness detectable.
+The extension reports **stale** only when `configPath` is present and hashing that exact file now
+gives something other than `fingerprint`. Without `configPath` a running container is reported
+**ready**: a mismatch against a file the extension found on its own is not evidence the config
+changed — the two sides may simply have hashed different things, and a working container must not
+be labelled out of date on a guess.
+
+So stale detection is opt-in from the setup side. Until setup publishes `configPath`, editing
+`devcontainer.json` will not be flagged.
 
 These are the script's resolved values, including the detected shell fallback and environment
 passed to lifecycle commands. An empty remoteUser means use the container's default user.

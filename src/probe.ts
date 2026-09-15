@@ -23,7 +23,10 @@ export interface Probe {
   image?: string;
   remoteUser?: string;
   workspaceFolder?: string;
+  /** Fingerprint the running container was built from (from the runtime description). */
   fingerprint?: string;
+  /** Fingerprint of the config file as it is on disk right now. */
+  expected?: string;
   runtime?: RuntimeDescription;
 }
 
@@ -39,6 +42,8 @@ export interface RuntimeDescription {
   shell: string;
   remoteEnv: Record<string, string>;
   fingerprint: string;
+  /** Absolute path of the config file setup hashed. Optional for older descriptions. */
+  configPath?: string;
 }
 
 /** Lowercase hex SHA-256 of the UTF-8 bytes of the config file setup resolved. */
@@ -68,6 +73,7 @@ export function probeEquals(a: Probe | undefined, b: Probe | undefined): boolean
     a.remoteUser === b.remoteUser &&
     a.workspaceFolder === b.workspaceFolder &&
     a.fingerprint === b.fingerprint &&
+    a.expected === b.expected &&
     runtimeEquals(a.runtime, b.runtime)
   );
 }
@@ -102,6 +108,10 @@ export function readRuntime(path: string): RuntimeDescription | undefined {
       if (typeof value[key] !== 'string' || !value[key] || value[key].includes('\0')) return undefined;
     }
     if (typeof value.remoteUser !== 'string' || value.remoteUser.includes('\0')) return undefined;
+    if (value.configPath !== undefined &&
+        (typeof value.configPath !== 'string' || !value.configPath || value.configPath.includes('\0'))) {
+      return undefined;
+    }
     if (!value.remoteEnv || typeof value.remoteEnv !== 'object' || Array.isArray(value.remoteEnv)) return undefined;
     for (const [key, entry] of Object.entries(value.remoteEnv)) {
       if (!key || /[=\0]/.test(key) || typeof entry !== 'string' || entry.includes('\0')) return undefined;
@@ -149,7 +159,7 @@ export async function probe(
   containerName: string,
   lockPath: string,
   runtimePath = '/tmp/che-devcontainer/runtime.json',
-  expectedFingerprint?: string
+  _expectedFingerprint?: string // retained for call-site compatibility; staleness uses configPath
 ): Promise<Probe> {
   if (buildInFlight(lockPath)) return { phase: 'building', containerName };
   const runtime = readRuntime(runtimePath);
@@ -164,9 +174,18 @@ export async function probe(
     }
     if (buildInFlight(lockPath)) return { phase: 'building', containerName };
     if (JSON.stringify(readRuntime(runtimePath)) !== JSON.stringify(runtime)) return { phase: 'none', containerName };
+    // Staleness is only claimed when it can be PROVEN: setup must have recorded which file it
+    // hashed, and that same file must now hash differently. A mismatch against a file the
+    // extension picked by its own discovery is not evidence the config changed — it is equally
+    // likely the two sides hashed different things, and a running container must not be labelled
+    // out of date on a guess. Without `configPath`, report ready.
+    const expected = runtime.configPath ? fingerprintFromFiles([runtime.configPath]) : undefined;
+    const provablyStale =
+      runtime.configPath !== undefined && expected !== undefined && expected !== runtime.fingerprint;
     return {
-      phase: expectedFingerprint !== undefined && runtime.fingerprint !== expectedFingerprint ? 'stale' : 'ready',
+      phase: provablyStale ? 'stale' : 'ready',
       containerName,
+      expected,
       image: runtime.image,
       remoteUser: runtime.remoteUser,
       workspaceFolder: runtime.workspaceFolder,
