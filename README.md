@@ -23,6 +23,8 @@
 Builds and runs the environment declared in `devcontainer.json` as a rootless podman container
 inside an Eclipse Che workspace, and opens terminals in it.
 
+![Dev container built and run with podman inside Eclipse Che](docs/images/demo.gif)
+
 ## Design
 
 The extension owns **no devcontainer logic**. `start-devcontainer.sh` in the workspace remains the
