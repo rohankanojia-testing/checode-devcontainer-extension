@@ -9,6 +9,7 @@
  ***********************************************************************/
 
 import { execFile } from 'child_process';
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import { promisify } from 'util';
 
@@ -38,6 +39,59 @@ export interface RuntimeDescription {
   shell: string;
   remoteEnv: Record<string, string>;
   fingerprint: string;
+}
+
+/** Lowercase hex SHA-256 of the UTF-8 bytes of the config file setup resolved. */
+export function fingerprintOfContents(contents: string): string {
+  return createHash('sha256').update(contents, 'utf8').digest('hex');
+}
+
+/** First readable path wins, so callers must pass discovery order. */
+export function fingerprintFromFiles(paths: string[]): string | undefined {
+  for (const filePath of paths) {
+    try {
+      return fingerprintOfContents(fs.readFileSync(filePath, 'utf8'));
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+export function probeEquals(a: Probe | undefined, b: Probe | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.phase === b.phase &&
+    a.containerName === b.containerName &&
+    a.image === b.image &&
+    a.remoteUser === b.remoteUser &&
+    a.workspaceFolder === b.workspaceFolder &&
+    a.fingerprint === b.fingerprint &&
+    runtimeEquals(a.runtime, b.runtime)
+  );
+}
+
+function runtimeEquals(a: RuntimeDescription | undefined, b: RuntimeDescription | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.containerId === b.containerId &&
+    a.containerName === b.containerName &&
+    a.podmanPath === b.podmanPath &&
+    a.image === b.image &&
+    a.remoteUser === b.remoteUser &&
+    a.workspaceFolder === b.workspaceFolder &&
+    a.shell === b.shell &&
+    a.fingerprint === b.fingerprint &&
+    envEquals(a.remoteEnv, b.remoteEnv)
+  );
+}
+
+function envEquals(a: Record<string, string>, b: Record<string, string>): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every(key => a[key] === b[key]);
 }
 
 export function readRuntime(path: string): RuntimeDescription | undefined {

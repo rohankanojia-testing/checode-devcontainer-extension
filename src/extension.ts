@@ -9,7 +9,7 @@
  ***********************************************************************/
 
 import * as vscode from 'vscode';
-import { Probe, probe, terminalArgs } from './probe';
+import { fingerprintFromFiles, Probe, probe, probeEquals, RuntimeDescription, terminalArgs } from './probe';
 
 const TASK_START = 'Start dev container';
 const TASK_REBUILD = 'Rebuild dev container';
@@ -18,14 +18,53 @@ const TASK_SHOW_LOG = 'Show dev container log';
 
 let current: Probe | undefined;
 let hasConfiguration = false;
-const CONFIG_GLOB = '{.devcontainer.json,.devcontainer/devcontainer.json,.devcontainer/*/devcontainer.json}';
+
+/** Discovery order must match start-devcontainer.sh and docs/script-integration.md. */
+const CONFIG_FILES = ['.devcontainer.json', '.devcontainer/devcontainer.json'] as const;
+const CONFIG_NAMED = '.devcontainer/*/devcontainer.json';
+const CONFIG_WATCH_GLOBS = [
+  '**/.devcontainer.json',
+  '**/.devcontainer/devcontainer.json',
+  '**/.devcontainer/*/devcontainer.json',
+];
+
+function uriFsPath(uri: vscode.Uri): string | undefined {
+  return uri && typeof uri === 'object' ? uri.fsPath : undefined;
+}
+
+async function findConfigUris(): Promise<vscode.Uri[]> {
+  const found: vscode.Uri[] = [];
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    for (const rel of CONFIG_FILES) {
+      found.push(...(await vscode.workspace.findFiles(new vscode.RelativePattern(folder, rel), null, 1)));
+    }
+    const named = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, CONFIG_NAMED));
+    named.sort((a, b) => (uriFsPath(a) ?? '').localeCompare(uriFsPath(b) ?? ''));
+    found.push(...named);
+  }
+  return found;
+}
 
 async function configurationExists(): Promise<boolean> {
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    const matches = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, CONFIG_GLOB), null, 1);
-    if (matches.length > 0) return true;
-  }
-  return false;
+  return (await findConfigUris()).length > 0;
+}
+
+function watchDevcontainerFiles(onEvent: () => void): vscode.Disposable {
+  return vscode.Disposable.from(
+    ...CONFIG_WATCH_GLOBS.map(pattern => {
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+      return vscode.Disposable.from(
+        watcher,
+        watcher.onDidCreate(onEvent),
+        watcher.onDidChange(onEvent),
+        watcher.onDidDelete(onEvent)
+      );
+    })
+  );
+}
+
+function isRunnable(state: Probe | undefined): state is Probe & { runtime: RuntimeDescription } {
+  return !!state && (state.phase === 'ready' || state.phase === 'stale') && !!state.runtime;
 }
 
 async function requireConfiguration(): Promise<boolean> {
@@ -33,6 +72,7 @@ async function requireConfiguration(): Promise<boolean> {
   void vscode.window.showInformationMessage('No devcontainer configuration found in this workspace.');
   return false;
 }
+
 let statusBar: vscode.StatusBarItem;
 let lastNotified: Probe['phase'] | undefined;
 
@@ -154,8 +194,8 @@ interface Action extends vscode.QuickPickItem {
 /** The one menu that lists every lifecycle action, so the user never has to know task names. */
 async function showActions(): Promise<void> {
   if (!await requireConfiguration()) return;
-  const ready = current?.phase === 'ready';
-  const running = current?.phase === 'ready' || current?.phase === 'building';
+  const ready = isRunnable(current);
+  const running = ready || current?.phase === 'building';
   const items: Action[] = [];
   if (!running) {
     items.push({
@@ -195,14 +235,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerTerminalProfileProvider('che-devcontainer.terminal', {
       async provideTerminalProfile() {
         if (!await requireConfiguration()) return undefined;
-        if (!current || current.phase !== 'ready' || !current.runtime) {
+        const state = current;
+        if (!isRunnable(state)) {
           vscode.window.showWarningMessage('Dev container is not ready yet.');
           return undefined;
         }
         return new vscode.TerminalProfile({
           name: 'devcontainer',
-          shellPath: current.runtime.podmanPath,
-          shellArgs: terminalArgs(current.runtime),
+          shellPath: state.runtime.podmanPath,
+          shellArgs: terminalArgs(state.runtime),
           iconPath: new vscode.ThemeIcon('vm'),
         });
       },
@@ -212,15 +253,16 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('che-devcontainer.openTerminal', async () => {
       if (!await requireConfiguration()) return;
-      if (!current || current.phase !== 'ready' || !current.runtime) {
+      const state = current;
+      if (!isRunnable(state)) {
         vscode.window.showWarningMessage('Dev container is not ready yet.');
         return;
       }
       vscode.window
         .createTerminal({
           name: 'devcontainer',
-          shellPath: current.runtime.podmanPath,
-          shellArgs: terminalArgs(current.runtime),
+          shellPath: state.runtime.podmanPath,
+          shellArgs: terminalArgs(state.runtime),
           iconPath: new vscode.ThemeIcon('vm'),
         })
         .show();
@@ -239,8 +281,9 @@ export function activate(context: vscode.ExtensionContext): void {
   let refreshVersion = 0;
   const refresh = async (): Promise<void> => {
     const version = ++refreshVersion;
-    const found = await configurationExists();
+    const uris = await findConfigUris();
     if (version !== refreshVersion) return;
+    const found = uris.length > 0;
     const added = found && !hasConfiguration;
     hasConfiguration = found;
     void vscode.commands.executeCommand('setContext', 'cheDevcontainer.hasConfiguration', found);
@@ -252,10 +295,15 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     const containerName = cfg().get<string>('containerName', 'devcontainer');
+    const expectedFingerprint = fingerprintFromFiles(
+      uris.map(uriFsPath).filter((p): p is string => Boolean(p))
+    );
+    if (version !== refreshVersion) return;
     let next = await probe(
       containerName,
       cfg().get<string>('lockPath', '/tmp/.devcontainer-setup.lock'),
-      cfg().get<string>('runtimePath', '/tmp/che-devcontainer/runtime.json')
+      cfg().get<string>('runtimePath', '/tmp/che-devcontainer/runtime.json'),
+      expectedFingerprint
     );
     if (version !== refreshVersion) return;
     // A build we launched outranks whatever the container currently looks like: during a rebuild
@@ -263,7 +311,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (activeBuilds > 0) {
       next = { phase: 'building', containerName };
     }
-    if (JSON.stringify(next) === JSON.stringify(current)) {
+    if (probeEquals(next, current)) {
       return;
     }
     current = next;
@@ -291,7 +339,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.tasks.onDidEndTaskProcess(e => {
       if (hasConfiguration && BUILD_TASKS.has(e.execution.task.name)) {
-        if (e.exitCode !== undefined && e.exitCode !== 0) {
+        if (e.exitCode !== undefined && e.exitCode !== 0 && cfg().get<boolean>('notify', true)) {
           // 78 (EX_CONFIG) is the setup script's signal that the workspace itself cannot support
           // nested containers — an administrator problem, not a broken build. Saying so is the
           // difference between a clear answer and a day spent reading podman errors.
@@ -312,11 +360,8 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  const watcher = vscode.workspace.createFileSystemWatcher(`**/${CONFIG_GLOB}`);
   context.subscriptions.push(
-    watcher,
-    watcher.onDidCreate(() => void refresh()),
-    watcher.onDidDelete(() => void refresh()),
+    watchDevcontainerFiles(() => void refresh()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => void refresh())
   );
 

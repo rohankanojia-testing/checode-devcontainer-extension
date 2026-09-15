@@ -31,8 +31,10 @@ container. This extension is the UI over it:
 
 - reads resolved terminal configuration from the setup runtime description and verifies its
   container ID and running state with `podman inspect`; task events track builds in flight
-- renders a status bar item (`building` / `ready` / `failed`)
-- notifies on transition, with **Open Terminal** / **Show Log**
+- compares the current `devcontainer.json` SHA-256 to the fingerprint setup published, so a
+  changed config shows **stale**
+- renders a status bar item (`building` / `ready` / `stale` / `unavailable` / `not started`)
+- notifies on transition, with **Open Terminal** / **Rebuild** / **Show Log**
 - provides **Open Terminal in Dev Container** and an explicitly selectable `devcontainer`
   profile; regular new terminals remain in the outer workspace container
 - runs the existing devfile tasks for rebuild and log, rather than reimplementing them
@@ -45,10 +47,10 @@ independently testable.
 | Question | Source |
 | --- | --- |
 | Ready, and with which user and folder? | Setup runtime JSON plus container ID/running-state verification |
-| Stale against `devcontainer.json`? | `che.devcontainer.config` fingerprint label |
+| Stale against `devcontainer.json`? | SHA-256 of the discovered config file vs `fingerprint` in the runtime JSON |
 | Build running, started here? | `onDidStartTask` / `onDidEndTask` |
 | Build running, started elsewhere? | PID in the setup script's lock file |
-| Build failed? | task exit code |
+| Build failed? | task exit code (honours `cheDevcontainer.notify`) |
 
 Setup publishes a private, atomic runtime description after success and removes it before the
 next setup attempt. It supplies the engine, container ID/name, user, working directory, shell,
@@ -93,8 +95,11 @@ Clicking it opens the action menu — everything in one place, no task names to 
 | --- | --- |
 | `src/` | extension source |
 | `media/` | walkthrough content |
-| `docs/script-integration.md` | runtime and lock contract with `start-devcontainer.sh` |
+| `docs/script-integration.md` | runtime, lock, and fingerprint contract with `start-devcontainer.sh` |
 | `docs/devfile-template.yaml` | devfile with commands and no `postStart` event |
+
+This repository is the editor UI only. Review it together with the `start-devcontainer.sh`
+change that publishes `runtime.json` — the extension cannot start a container on its own.
 
 ## Build
 

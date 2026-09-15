@@ -21,15 +21,15 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/rohanKanojia/devcontainer-runtime-support-via-podman"
+    "url": "https://github.com/rohankanojia-testing/checode-devcontainer-extension"
   },
   "bugs": {
     "url": "https://github.com/eclipse-che/che/issues/23458"
   },
   "capabilities": {
-    "virtualWorkspaces": true,
+    "virtualWorkspaces": false,
     "untrustedWorkspaces": {
-      "supported": true
+      "supported": false
     }
   },
   "main": "./out/extension.js",
@@ -84,7 +84,7 @@
         "cheDevcontainer.notify": {
           "type": "boolean",
           "default": true,
-          "description": "Show a notification when the dev container becomes ready or fails."
+          "description": "Show a notification when the dev container becomes ready, goes stale, or a build fails."
         },
         "cheDevcontainer.lockPath": {
           "type": "string",
@@ -114,7 +114,7 @@
       "commandPalette": [
         {
           "command": "che-devcontainer.openTerminal",
-          "when": "cheDevcontainer.hasConfiguration && cheDevcontainer.state == ready"
+          "when": "cheDevcontainer.hasConfiguration && (cheDevcontainer.state == ready || cheDevcontainer.state == stale)"
         },
         {
           "command": "che-devcontainer.rebuild",
@@ -134,7 +134,7 @@
         },
         {
           "command": "che-devcontainer.start",
-          "when": "cheDevcontainer.hasConfiguration && cheDevcontainer.state != ready"
+          "when": "cheDevcontainer.hasConfiguration && cheDevcontainer.state != ready && cheDevcontainer.state != building"
         }
       ]
     },

@@ -6,6 +6,9 @@ package-lock.json
 .vscode/**
 .github/**
 .gitignore
+.remember/**
+.git/**
+*.vsix
 images/extension-page.png
 
 test/**

@@ -22,9 +22,22 @@ The parent directory is created with mode 0700. Keep the file outside the reposi
   "workspaceFolder": "/workspace",
   "shell": "bash",
   "remoteEnv": {},
-  "fingerprint": "resolved-config-fingerprint"
+  "fingerprint": "lowercase-hex-sha256-of-the-resolved-config-file"
 }
 ```
+
+`fingerprint` is the lowercase hex SHA-256 of the UTF-8 bytes of the config file setup used.
+Discovery order (first readable file wins; both sides must use the same file):
+
+1. `.devcontainer.json` at the workspace folder root
+2. `.devcontainer/devcontainer.json`
+3. `.devcontainer/*/devcontainer.json` (sorted by absolute path)
+
+In the setup script this is `sha256sum "$CONFIG_FILE" | cut -d' ' -f1` after resolving
+`CONFIG_FILE` with that order. The extension hashes the same file on each refresh; a mismatch
+is **stale** (container still running, config changed since it was built). Upgrade setup and
+extension together so the algorithm matches — an older script that published a different
+fingerprint will look permanently stale.
 
 These are the script's resolved values, including the detected shell fallback and environment
 passed to lifecycle commands. An empty remoteUser means use the container's default user.

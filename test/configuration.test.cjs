@@ -14,20 +14,31 @@ test('configuration presence gates UI, probing and explicit actions across file 
   const contexts = new Map();
   const messages = [];
   const patterns = [];
+  const watchPatterns = [];
   const disposable = { dispose() {} };
+  class Disposable {
+    constructor(dispose) { this.dispose = dispose; }
+    static from(...items) {
+      return new Disposable(() => { for (const item of items) item?.dispose?.(); });
+    }
+  }
   const status = { visible: false, show() { this.visible = true; }, hide() { this.visible = false; }, dispose() {} };
   const vscode = {
     StatusBarAlignment: { Left: 1 },
     RelativePattern: class { constructor(folder, pattern) { this.base = folder; this.pattern = pattern; } },
     ThemeIcon: class {},
-    Disposable: class { constructor(dispose) { this.dispose = dispose; } },
+    Disposable,
     workspace: {
       workspaceFolders: [{ uri: 'workspace' }],
       findFiles: async pattern => { patterns.push(pattern.pattern); return present ? ['config'] : []; },
       getConfiguration: () => ({ get: (_key, fallback) => fallback }),
-      createFileSystemWatcher: () => ({ ...disposable,
-        onDidCreate: cb => { create = cb; return disposable; },
-        onDidDelete: cb => { remove = cb; return disposable; } }),
+      createFileSystemWatcher: pattern => {
+        watchPatterns.push(pattern);
+        return { ...disposable,
+          onDidCreate: cb => { create = cb; return disposable; },
+          onDidChange: () => disposable,
+          onDidDelete: cb => { remove = cb; return disposable; } };
+      },
       onDidChangeWorkspaceFolders: cb => { foldersChanged = cb; return disposable; },
     },
     window: {
@@ -53,7 +64,14 @@ test('configuration presence gates UI, probing and explicit actions across file 
   const originalLoad = Module._load;
   Module._load = function(id, ...args) {
     if (id === 'vscode') return vscode;
-    if (id === './probe') return { probe: async () => { probes++; return { phase: 'none' }; } };
+    if (id === './probe') {
+      return {
+        probe: async () => { probes++; return { phase: 'none' }; },
+        fingerprintFromFiles: () => undefined,
+        probeEquals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+        terminalArgs: () => [],
+      };
+    }
     return originalLoad.call(this, id, ...args);
   };
   let extension;
@@ -92,6 +110,14 @@ test('configuration presence gates UI, probing and explicit actions across file 
     foldersChanged();
     await flush();
     assert.equal(status.visible, false);
-    assert.ok(patterns.every(p => p === '{.devcontainer.json,.devcontainer/devcontainer.json,.devcontainer/*/devcontainer.json}'));
+    const discovery = ['.devcontainer.json', '.devcontainer/devcontainer.json', '.devcontainer/*/devcontainer.json'];
+    assert.ok(patterns.length > 0);
+    assert.ok(patterns.every(p => discovery.includes(p)));
+    assert.deepEqual([...new Set(patterns)].sort(), [...discovery].sort());
+    assert.deepEqual(watchPatterns, [
+      '**/.devcontainer.json',
+      '**/.devcontainer/devcontainer.json',
+      '**/.devcontainer/*/devcontainer.json',
+    ]);
   } finally { for (const subscription of subscriptions) subscription.dispose(); }
 });
