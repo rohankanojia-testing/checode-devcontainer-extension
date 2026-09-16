@@ -7,7 +7,15 @@ test('configuration presence gates UI, probing and explicit actions across file 
   let probes = 0;
   let taskFetches = 0;
   let profile;
-  let terminalOpened, terminalClosed, taskStarted;
+  let terminalOpened, terminalClosed, taskStarted, taskEnded, taskProcessEnded;
+  const PODMAN = '/usr/bin/podman.orig';
+  const READY = {
+    phase: 'ready',
+    containerName: 'devcontainer',
+    runtime: { podmanPath: PODMAN, containerName: 'devcontainer', workspaceFolder: '/workspace',
+      shell: 'bash', remoteUser: 'node', remoteEnv: {} },
+  };
+  let probeResult = { phase: 'none' };
   const disposedTerminals = [];
   let create;
   let remove;
@@ -51,7 +59,9 @@ test('configuration presence gates UI, probing and explicit actions across file 
       registerTerminalProfileProvider: (_id, provider) => { profile = provider; return disposable; },
       showInformationMessage: async message => { messages.push(message); },
       showWarningMessage: async message => { messages.push(message); },
-      createTerminal: options => ({ ...options, show() {}, dispose() { disposedTerminals.push(this.name); } }),
+      showErrorMessage: async message => { messages.push(message); },
+      createTerminal: options => ({ ...options, creationOptions: options,
+        show() {}, dispose() { disposedTerminals.push(this.name); } }),
       onDidOpenTerminal: cb => { terminalOpened = cb; return disposable; },
       onDidCloseTerminal: cb => { terminalClosed = cb; return disposable; },
     },
@@ -65,8 +75,8 @@ test('configuration presence gates UI, probing and explicit actions across file 
     tasks: {
       fetchTasks: async () => { taskFetches++; return []; },
       onDidStartTask: cb => { taskStarted = cb; return disposable; },
-      onDidEndTask: () => disposable,
-      onDidEndTaskProcess: () => disposable,
+      onDidEndTask: cb => { taskEnded = cb; return disposable; },
+      onDidEndTaskProcess: cb => { taskProcessEnded = cb; return disposable; },
     },
   };
   const originalLoad = Module._load;
@@ -74,8 +84,7 @@ test('configuration presence gates UI, probing and explicit actions across file 
     if (id === 'vscode') return vscode;
     if (id === './probe') {
       return {
-        probe: async () => { probes++; return { phase: 'none' }; },
-        fingerprintFromFiles: () => undefined,
+        probe: async () => { probes++; return probeResult; },
         probeEquals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
         terminalArgs: () => [],
       };
@@ -128,12 +137,44 @@ test('configuration presence gates UI, probing and explicit actions across file 
       '**/.devcontainer/*/devcontainer.json',
     ]);
 
+    // Bring the workspace back to a running dev container: a configuration is present again and
+    // the probe reports ready, which is what the remaining assertions exercise.
+    vscode.workspace.workspaceFolders = [{ uri: 'workspace' }];
+    present = true;
+    probeResult = READY;
+    foldersChanged();
+    await flush();
+    messages.length = 0;
+
+    // Consecutive edits to devcontainer.json each deserve their own warning. The phase stays
+    // `stale` throughout, so a naive transition check would announce the first edit and silently
+    // swallow every one after it.
+    const settle = async result => { probeResult = result; foldersChanged(); await flush(); };
+    const stale = expected => ({ phase: 'stale', containerName: 'devcontainer', expected, runtime: READY.runtime });
+    await settle(stale('hash-one'));
+    await settle(stale('hash-one'));   // a poll, not an edit: must stay quiet
+    await settle(stale('hash-two'));   // a second edit: must warn again
+    const warnings = messages.filter(m => /has changed since this container was built/.test(m));
+    assert.equal(warnings.length, 2, 'each edit warns once, and a re-poll of the same content does not');
+
+    // A rebuild that matches the config re-arms the warning for the next edit.
+    await settle(READY);
+    messages.length = 0;
+    await settle(stale('hash-two'));
+    assert.equal(messages.filter(m => /has changed since this container was built/.test(m)).length, 1);
+    await settle(READY);
+    taskEnded({ execution: { task: { name: 'Rebuild dev container' } } });
+
     // A rebuild runs `podman rm -f`, SIGKILLing the exec sessions behind any attached terminal.
     // The extension closes them first so the user never sees "terminated with exit code: 137".
-    const open = name => { const t = vscode.window.createTerminal({ name }); terminalOpened(t); return t; };
+    // Ownership is decided by the shell that was launched, not by the terminal's name.
+    const open = (name, shellPath = PODMAN) => {
+      const t = vscode.window.createTerminal({ name, shellPath }); terminalOpened(t); return t;
+    };
     open('devcontainer');
     open('devcontainer');
-    open('bash');                       // not ours; must survive
+    open('bash', '/bin/bash');          // not ours; must survive
+    open('devcontainer', '/bin/bash');  // user's own terminal that happens to share the name
     taskStarted({ execution: { task: { name: 'Rebuild dev container' } } });
     assert.deepEqual(disposedTerminals, ['devcontainer', 'devcontainer']);
 
@@ -145,12 +186,6 @@ test('configuration presence gates UI, probing and explicit actions across file 
 
     // Status bar wording and colour per state. Only warning/error backgrounds exist, and ready
     // deliberately uses neither — colour is reserved for states that want attention.
-    // render() hides everything unless a configuration is present, and an earlier step emptied
-    // workspaceFolders — restore both before exercising the status bar.
-    vscode.workspace.workspaceFolders = [{ uri: 'workspace' }];
-    present = true;
-    foldersChanged();
-    await flush();
     const render = extension.__renderForTest ?? null;
     if (render) {
       const seen = phase => { render(phase === 'none' ? undefined : { phase, containerName: 'devcontainer' });
@@ -170,5 +205,52 @@ test('configuration presence gates UI, probing and explicit actions across file 
     terminalClosed(closed);
     taskStarted({ execution: { task: { name: 'Rebuild dev container' } } });
     assert.deepEqual(disposedTerminals, ['devcontainer']);
+
+    // A build task this window started outranks the probe: during a rebuild the old container is
+    // still up and reporting `ready` would be a lie. The counter must also come back down.
+    messages.length = 0;
+    probeResult = READY;
+    // Earlier steps started build tasks to exercise terminal teardown and never ended them. Drain
+    // the counter first; it floors at zero, so over-draining is safe.
+    for (let i = 0; i < 6; i++) taskEnded({ execution: { task: { name: 'Rebuild dev container' } } });
+    // The status bar was last painted directly by __renderForTest, and an unchanged probe does not
+    // repaint it. Move through a different phase so the ready render below is a real one.
+    await settle({ phase: 'none', containerName: 'devcontainer' });
+    await settle(READY);
+    assert.match(status.text, /Dev Container: Ready$/, 'no build in flight to begin with');
+    taskStarted({ execution: { task: { name: 'Rebuild dev container' } } });
+    await flush();
+    assert.match(status.text, /Dev Container: Building$/, 'build in flight outranks a ready probe');
+    taskEnded({ execution: { task: { name: 'Rebuild dev container' } } });
+    await flush();
+    assert.match(status.text, /Dev Container: Ready$/, 'counter decremented when the task ended');
+
+    // `Show dev container log` is a tail -f that never ends, so it must not be counted as a build.
+    taskStarted({ execution: { task: { name: 'Show dev container log' } } });
+    await flush();
+    assert.match(status.text, /Dev Container: Ready$/, 'the log task is not a build');
+    taskEnded({ execution: { task: { name: 'Show dev container log' } } });
+    await flush();
+
+    // Exit 78 (EX_CONFIG) is the setup script saying the cluster cannot run nested containers.
+    // Reporting it as a generic build failure is the difference between a clear answer and a day
+    // spent reading podman errors, so the wording is asserted rather than just the presence.
+    messages.length = 0;
+    taskProcessEnded({ execution: { task: { name: 'Rebuild dev container' } }, exitCode: 78 });
+    await flush();
+    assert.equal(messages.length, 1);
+    assert.match(messages[0], /cannot run nested containers/);
+    assert.match(messages[0], /disableContainerRunCapabilities/);
+
+    // Any other non-zero exit names the task and the code, and nothing is said on success.
+    messages.length = 0;
+    taskProcessEnded({ execution: { task: { name: 'Rebuild dev container' } }, exitCode: 1 });
+    await flush();
+    assert.deepEqual(messages, ['Rebuild dev container failed (exit 1).']);
+    messages.length = 0;
+    taskProcessEnded({ execution: { task: { name: 'Rebuild dev container' } }, exitCode: 0 });
+    taskProcessEnded({ execution: { task: { name: 'Show dev container log' } }, exitCode: 2 });
+    await flush();
+    assert.deepEqual(messages, [], 'success is silent, and the log task is not a build');
   } finally { for (const subscription of subscriptions) subscription.dispose(); }
 });

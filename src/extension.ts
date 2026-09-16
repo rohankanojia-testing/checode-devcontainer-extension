@@ -9,7 +9,7 @@
  ***********************************************************************/
 
 import * as vscode from 'vscode';
-import { fingerprintFromFiles, Probe, probe, probeEquals, RuntimeDescription, terminalArgs } from './probe';
+import { Probe, probe, probeEquals, RuntimeDescription, terminalArgs } from './probe';
 
 const TASK_START = 'Start dev container';
 const TASK_REBUILD = 'Rebuild dev container';
@@ -85,6 +85,12 @@ let lastStaleWarning: string | undefined;
  * rather than a crash the user has to interpret.
  */
 const containerTerminals = new Set<vscode.Terminal>();
+
+/**
+ * podman path from the most recent runtime description. Kept separately from `current` because a
+ * terminal can be opened while the probe reports `building`, which carries no runtime at all.
+ */
+let lastPodmanPath: string | undefined;
 
 function closeContainerTerminals(): void {
   for (const terminal of containerTerminals) {
@@ -192,18 +198,25 @@ async function notify(state: Probe): Promise<void> {
   if (state.phase === 'stale') {
     // Warn once per config content. Rebuilding does not change devcontainer.json, so a rebuild
     // must not produce another warning — only a further edit should.
+    //
+    // This gate is deliberately separate from the phase-transition gate below. Consecutive edits
+    // leave the phase at `stale` throughout, so sharing that gate would suppress every edit after
+    // the first: a new fingerprint IS a new edit, whatever the previous phase was.
     if (lastStaleWarning === (state.expected ?? '')) {
       lastNotified = state.phase;
       return;
     }
     lastStaleWarning = state.expected ?? '';
-  } else if (state.phase === 'ready') {
-    lastStaleWarning = undefined; // a matching build re-arms the warning for the next edit
+    lastNotified = state.phase;
+  } else {
+    if (state.phase === 'ready') {
+      lastStaleWarning = undefined; // a matching build re-arms the warning for the next edit
+    }
+    if (state.phase === lastNotified) {
+      return; // only on transition
+    }
+    lastNotified = state.phase;
   }
-  if (state.phase === lastNotified) {
-    return; // only on transition
-  }
-  lastNotified = state.phase;
 
   if (state.phase === 'ready') {
     const open = 'Open Terminal in Dev Container';
@@ -346,17 +359,17 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     const containerName = cfg().get<string>('containerName', 'devcontainer');
-    const expectedFingerprint = fingerprintFromFiles(
-      uris.map(uriFsPath).filter((p): p is string => Boolean(p))
-    );
-    if (version !== refreshVersion) return;
+    // No fingerprint is computed here on purpose. Staleness is decided inside the probe against
+    // the file setup recorded in `configPath`; hashing the files the extension discovered would
+    // be a second, unrelated opinion — and doing it on every poll read every config file from
+    // disk for a value nothing consumed.
     let next = await probe(
       containerName,
       cfg().get<string>('lockPath', '/tmp/.devcontainer-setup.lock'),
-      cfg().get<string>('runtimePath', '/tmp/che-devcontainer/runtime.json'),
-      expectedFingerprint
+      cfg().get<string>('runtimePath', '/tmp/che-devcontainer/runtime.json')
     );
     if (version !== refreshVersion) return;
+    if (next.runtime?.podmanPath) lastPodmanPath = next.runtime.podmanPath;
     // A build we launched outranks whatever the container currently looks like: during a rebuild
     // the old container is still up, and reporting "ready" then would be a lie.
     if (activeBuilds > 0) {
@@ -376,8 +389,13 @@ export function activate(context: vscode.ExtensionContext): void {
   // events, so the poll is only a slow backstop for anything started elsewhere.
   context.subscriptions.push(
     vscode.window.onDidOpenTerminal(t => {
-      // The terminal profile creates terminals we never see a handle for at creation time.
-      if (t.name === 'devcontainer') containerTerminals.add(t);
+      // The terminal profile creates terminals we never see a handle for at creation time, so they
+      // are claimed here instead. Match on the shell that was launched, not on the name: a user is
+      // free to name their own terminal "devcontainer" and it must not be disposed by a rebuild.
+      const options = t.creationOptions as vscode.TerminalOptions | undefined;
+      if (options?.shellPath && options.shellPath === lastPodmanPath) {
+        containerTerminals.add(t);
+      }
     }),
     vscode.window.onDidCloseTerminal(t => containerTerminals.delete(t)),
     vscode.tasks.onDidStartTask(e => {

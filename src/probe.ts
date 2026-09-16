@@ -137,13 +137,19 @@ export function terminalArgs(runtime: RuntimeDescription): string[] {
  * OOMKill, where no cleanup trap ever runs.
  */
 export function buildInFlight(lockPath: string): boolean {
-  let pid: number;
+  let raw: string;
   try {
-    pid = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10);
+    raw = fs.readFileSync(lockPath, 'utf8').trim();
   } catch {
     return false;
   }
-  if (!Number.isInteger(pid) || pid <= 0) {
+  // Digits only, deliberately not parseInt: parseInt('1.5abc') is 1, and PID 1 always exists, so
+  // a truncated or corrupt lock file would report a build in flight forever with no way back.
+  if (!/^[0-9]+$/.test(raw)) {
+    return false;
+  }
+  const pid = Number(raw);
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
     return false;
   }
   try {
@@ -158,8 +164,7 @@ export function buildInFlight(lockPath: string): boolean {
 export async function probe(
   containerName: string,
   lockPath: string,
-  runtimePath = '/tmp/che-devcontainer/runtime.json',
-  _expectedFingerprint?: string // retained for call-site compatibility; staleness uses configPath
+  runtimePath = '/tmp/che-devcontainer/runtime.json'
 ): Promise<Probe> {
   if (buildInFlight(lockPath)) return { phase: 'building', containerName };
   const runtime = readRuntime(runtimePath);
