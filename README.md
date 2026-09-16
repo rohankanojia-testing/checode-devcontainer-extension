@@ -11,11 +11,33 @@ inside an Eclipse Che workspace, and opens terminals in it.
 
 ![Dev container built and run with podman inside Eclipse Che](docs/images/demo.gif)
 
+## Supported configurations
+
+Nothing here reimplements the devcontainer spec. `start-devcontainer.sh` drives the reference
+implementation, [`@devcontainers/cli`](https://github.com/devcontainers/cli), with podman as the
+container engine — so what works is, with one exception, whatever that CLI supports.
+
+| `devcontainer.json` declares | |
+| --- | --- |
+| `image` | **Supported** |
+| `build.dockerfile` (or legacy `dockerFile`) | **Supported** |
+| `dockerComposeFile` + `service` | **Not supported** — see below |
+
+Compose is the exception. The CLI supports it, but its compose path shells out to a separate
+`docker compose` binary rather than driving the engine directly, and the workspace has rootless
+podman only. Multi-container devcontainers therefore need work in the setup script, not a flag
+here.
+
+Everything else follows the CLI's own support: features, lifecycle commands, `remoteUser`,
+`remoteEnv`, mounts. If the CLI handles it, this does; if it does not, no amount of editor UI
+will change that.
+
 ## How it works
 
-`start-devcontainer.sh` in the workspace is the engine: it resolves the config, builds the image,
-runs lifecycle commands and starts the container. This extension is only the UI over it — it owns
-no devcontainer logic, which keeps the che-code diff small and the script independently testable.
+`start-devcontainer.sh` in the workspace is the engine: it invokes `@devcontainers/cli` to resolve
+the config, build the image and run lifecycle commands, then starts the container with podman.
+This extension is only the UI over it — it owns no devcontainer logic, which keeps the che-code
+diff small and the script independently testable.
 
 It reads the runtime description the script publishes, verifies the container with
 `podman inspect`, and renders one status bar item:
@@ -42,7 +64,7 @@ on its own, so review it alongside the `start-devcontainer.sh` change that publi
 
 - Installing the extensions `devcontainer.json` asks for (they surface as recommendations)
 - Applying its `settings` block (currently written at machine scope, so user settings win)
-- Any `devcontainer.json` parsing — deliberately left in the script
+- Any `devcontainer.json` parsing — deliberately left to `@devcontainers/cli` in the script
 
 ## Build
 
