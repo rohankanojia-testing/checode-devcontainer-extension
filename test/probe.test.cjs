@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {
   buildInFlight,
+  firstReportedCause,
   fingerprintFromFiles,
   fingerprintOfContents,
   probeEquals,
@@ -306,5 +307,49 @@ test('file fingerprint hashes raw bytes without UTF-8 replacement', () => {
     const bytes = Buffer.from([0xff, 0xfe, 0x0a]);
     fs.writeFileSync(file, bytes);
     assert.equal(fingerprintFromFiles([file]), createHash('sha256').update(bytes).digest('hex'));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a failed build names the cause from the log rather than just an exit code', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-log-'));
+  try {
+    const logPath = path.join(dir, 'devcontainer.log');
+    const write = lines => fs.writeFileSync(logPath, lines.join('\n'));
+
+    assert.equal(firstReportedCause(path.join(dir, 'missing.log')), undefined, 'no log at all');
+
+    write(['[1/8] engine: /usr/bin/podman.orig', '[5/8] building image (slow part)...']);
+    assert.equal(firstReportedCause(logPath), undefined, 'a clean log has no cause to report');
+
+    // The real-world shape: a Feature fails, and the line saying so is hundreds of lines up from
+    // the exit code the task reports.
+    write([
+      '[2026-09-16T17:43:54.055Z] (!) The \'moby\' option is not supported on ubuntu \'resolute\'',
+      '[2026-09-16T17:43:54.056Z] ERROR: Feature "Docker (Docker-in-Docker)" (ghcr.io/devcontainers/features/docker-in-docker) failed to install!',
+      '[2026-09-16T17:43:54.057Z] subprocess exited with status 1',
+      '[2026-09-16T17:43:55.152Z] Exit code 1',
+    ]);
+    assert.equal(firstReportedCause(logPath), 'Feature "Docker (Docker-in-Docker)" failed to install.');
+
+    // A rebuild appends to the same log, so the LAST failure is the current one.
+    fs.appendFileSync(logPath, '\nERROR: Feature "Azure CLI" (ghcr.io/devcontainers/features/azure-cli) failed to install!\n');
+    assert.equal(firstReportedCause(logPath), 'Feature "Azure CLI" failed to install.');
+
+    // No feature marker: fall back to the last ERROR/Error line, with the CLI timestamp stripped.
+    write([
+      'Copying blob sha256:81df7ff16254',
+      '[2026-09-16T19:40:12.461Z] Error: building at STEP "RUN npm ci": exit status 1',
+    ]);
+    assert.equal(firstReportedCause(logPath), 'Error: building at STEP "RUN npm ci": exit status 1');
+
+    // Long lines are truncated so the notification stays readable.
+    write([`ERROR: ${'x'.repeat(500)}`]);
+    const long = firstReportedCause(logPath);
+    assert.ok(long.length <= 200, `expected truncation, got ${long.length} chars`);
+    assert.ok(long.endsWith('…'));
+
+    // Only the tail is read: a marker far above the window is deliberately not reported.
+    write(['ERROR: Feature "Buried" (x) failed to install!', 'y'.repeat(200000)]);
+    assert.equal(firstReportedCause(logPath, 4096), undefined, 'older failures scroll out of the tail');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

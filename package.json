@@ -100,6 +100,11 @@
           "type": "string",
           "default": "/tmp/che-devcontainer/runtime.json",
           "description": "Runtime description published by setup. Must match CHE_DEVCONTAINER_RUNTIME in start-devcontainer.sh."
+        },
+        "cheDevcontainer.logPath": {
+          "type": "string",
+          "default": "/tmp/devcontainer.log",
+          "description": "Setup log read to name the cause when a build task fails."
         }
       }
     },

@@ -210,3 +210,51 @@ export async function probe(
     return { phase: (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'unavailable' : 'none', containerName };
   }
 }
+
+/**
+ * Pull the most specific cause out of a setup log, for a failure notification.
+ *
+ * A non-zero exit code alone sends the user to a several-hundred-line log to find one line. The
+ * devcontainer CLI prints a recognisable marker when a Feature fails to install, which is the most
+ * common real-world build failure and has nothing to do with this extension or with podman — so
+ * naming it turns "go read the log" into a diagnosis.
+ *
+ * Only the tail is read: the interesting lines are at the end, and setup logs reach megabytes.
+ */
+export function firstReportedCause(logPath: string, tailBytes = 65536): string | undefined {
+  let text: string;
+  try {
+    const { size } = fs.statSync(logPath);
+    const start = Math.max(0, size - tailBytes);
+    const fd = fs.openSync(logPath, 'r');
+    try {
+      const buffer = Buffer.alloc(Math.min(tailBytes, size));
+      fs.readSync(fd, buffer, 0, buffer.length, start);
+      text = buffer.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
+
+  const lines = text.split('\n').map(line => line.replace(/\r$/, ''));
+  // Scan backwards: a rebuild appends to the same log, so the last failure is the current one.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const feature = /ERROR: Feature "([^"]+)"/.exec(lines[i]);
+    if (feature) return `Feature "${feature[1]}" failed to install.`;
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    // Timestamps are prefixed by the CLI; strip one so the message reads as a sentence.
+    const stripped = line.replace(/^\[[^\]]+\]\s*/, '');
+    if (/^ERROR:\s/.test(stripped) || /^Error:\s/.test(stripped)) {
+      return truncate(stripped);
+    }
+  }
+  return undefined;
+}
+
+function truncate(value: string, max = 200): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}

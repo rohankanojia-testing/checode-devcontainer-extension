@@ -21,16 +21,27 @@ container engine — so what works is, with one exception, whatever that CLI sup
 | --- | --- |
 | `image` | **Supported** |
 | `build.dockerfile` (or legacy `dockerFile`) | **Supported** |
-| `dockerComposeFile` + `service` | **Not supported** — see below |
+| `dockerComposeFile` + `service` | **Not supported** — silently ignored, see below |
 
-Compose is the exception. The CLI supports it, but its compose path shells out to a separate
-`docker compose` binary rather than driving the engine directly, and the workspace has rootless
-podman only. Multi-container devcontainers therefore need work in the setup script, not a flag
-here.
+Compose is the exception, and the limitation is in the setup script rather than in podman or the
+CLI. The script runs `devcontainer build`, which builds images but never creates the services a
+compose file declares; the resulting image is then run as a single container and
+`dockerComposeFile` is **silently ignored**. You get a dev container that starts normally and is
+missing every other service — a database that was never created rather than an error.
 
-Everything else follows the CLI's own support: features, lifecycle commands, `remoteUser`,
-`remoteEnv`, mounts. If the CLI handles it, this does; if it does not, no amount of editor UI
-will change that.
+Compose itself works in this environment. Verified in an Eclipse Che workspace with
+`podman-compose` installed: `devcontainer up --docker-path <podman>` brought up both services, the
+compose network resolved `db` to a routable address, and PostgreSQL accepted connections.
+Supporting it therefore means a second code path in the script — `devcontainer up`, discovering the
+container from its output instead of assuming a name, and leaving lifecycle commands to the CLI —
+plus a compose provider in the workspace image, which the universal developer image does not
+currently ship.
+
+Everything else follows the CLI's own support: lifecycle commands, `remoteUser`, `remoteEnv`,
+mounts. If the CLI handles it, this does; if it does not, no amount of editor UI will change that.
+The exception worth knowing about is `features`, which are fetched from OCI registries and built
+against the base image, so they depend both on cluster egress and on that image's distribution
+being one the feature supports.
 
 ## How it works
 

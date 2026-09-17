@@ -9,7 +9,7 @@
  ***********************************************************************/
 
 import * as vscode from 'vscode';
-import { Probe, probe, probeEquals, RuntimeDescription, terminalArgs } from './probe';
+import { firstReportedCause, Probe, probe, probeEquals, RuntimeDescription, terminalArgs } from './probe';
 
 const TASK_START = 'Start dev container';
 const TASK_REBUILD = 'Rebuild dev container';
@@ -420,12 +420,21 @@ export function activate(context: vscode.ExtensionContext): void {
           // 78 (EX_CONFIG) is the setup script's signal that the workspace itself cannot support
           // nested containers — an administrator problem, not a broken build. Saying so is the
           // difference between a clear answer and a day spent reading podman errors.
+          // Anything else: name the cause from the log if one is recognisable. Most real failures
+          // are a Feature that could not install — unrelated to podman or to this extension — and
+          // the line saying so is buried hundreds of lines up.
+          const cause =
+            e.exitCode === EXIT_UNSUPPORTED_ENVIRONMENT
+              ? undefined
+              : firstReportedCause(cfg().get<string>('logPath', '/tmp/devcontainer.log'));
           const message =
             e.exitCode === EXIT_UNSUPPORTED_ENVIRONMENT
               ? 'This workspace cannot run nested containers. Container-run capabilities are not ' +
                 'enabled on this cluster — an administrator must set ' +
                 'devEnvironments.disableContainerRunCapabilities to false in the CheCluster CR.'
-              : `${e.execution.task.name} failed (exit ${e.exitCode}).`;
+              : cause
+                ? `${e.execution.task.name} failed (exit ${e.exitCode}). ${cause}`
+                : `${e.execution.task.name} failed (exit ${e.exitCode}).`;
           void vscode.window.showErrorMessage(message, 'Show Log').then(c => {
             if (c === 'Show Log') {
               void vscode.commands.executeCommand('che-devcontainer.showLog');

@@ -16,6 +16,9 @@ test('configuration presence gates UI, probing and explicit actions across file 
       shell: 'bash', remoteUser: 'node', remoteEnv: {} },
   };
   let probeResult = { phase: 'none' };
+  let reportedCause;
+  let nextInfoChoice;
+  const stored = new Map();
   const disposedTerminals = [];
   let create;
   let remove;
@@ -57,7 +60,7 @@ test('configuration presence gates UI, probing and explicit actions across file 
     window: {
       createStatusBarItem: () => status,
       registerTerminalProfileProvider: (_id, provider) => { profile = provider; return disposable; },
-      showInformationMessage: async message => { messages.push(message); },
+      showInformationMessage: async message => { messages.push(message); return nextInfoChoice; },
       showWarningMessage: async message => { messages.push(message); },
       showErrorMessage: async message => { messages.push(message); },
       createTerminal: options => ({ ...options, creationOptions: options,
@@ -85,6 +88,7 @@ test('configuration presence gates UI, probing and explicit actions across file 
     if (id === './probe') {
       return {
         probe: async () => { probes++; return probeResult; },
+        firstReportedCause: () => reportedCause,
         probeEquals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
         terminalArgs: () => [],
       };
@@ -96,7 +100,10 @@ test('configuration presence gates UI, probing and explicit actions across file 
   const subscriptions = [];
   const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(setImmediate); };
   try {
-    extension.activate({ subscriptions, workspaceState: { get: () => false } });
+    extension.activate({ subscriptions, workspaceState: {
+      get: key => stored.get(key),
+      update: async (key, value) => { stored.set(key, value); },
+    } });
     await flush();
     assert.equal(contexts.get('cheDevcontainer.state'), 'noConfiguration');
     assert.equal(contexts.get('cheDevcontainer.hasConfiguration'), false);
@@ -252,5 +259,45 @@ test('configuration presence gates UI, probing and explicit actions across file 
     taskProcessEnded({ execution: { task: { name: 'Show dev container log' } }, exitCode: 2 });
     await flush();
     assert.deepEqual(messages, [], 'success is silent, and the log task is not a build');
+
+    // A failed build names the cause when the log offers one, instead of only an exit code.
+    messages.length = 0;
+    reportedCause = 'Feature "Docker (Docker-in-Docker)" failed to install.';
+    taskProcessEnded({ execution: { task: { name: 'Rebuild dev container' } }, exitCode: 1 });
+    await flush();
+    assert.deepEqual(messages, [
+      'Rebuild dev container failed (exit 1). Feature "Docker (Docker-in-Docker)" failed to install.',
+    ]);
+
+    // Exit 78 keeps its administrator-facing wording; the log cause would only bury the point.
+    messages.length = 0;
+    taskProcessEnded({ execution: { task: { name: 'Rebuild dev container' } }, exitCode: 78 });
+    await flush();
+    assert.equal(messages.length, 1);
+    assert.match(messages[0], /cannot run nested containers/);
+    assert.ok(!messages[0].includes('Docker-in-Docker'), 'the log cause must not override exit 78');
+    reportedCause = undefined;
+
+    // The build prompt is offered once per workspace, and "Don't ask again" is remembered.
+    const readd = async () => {
+      present = false; remove(); await flush();
+      present = true; create(); await flush();
+    };
+    const prompts = () => messages.filter(m => /devcontainer.json detected/.test(m)).length;
+    probeResult = { phase: 'none' };
+    messages.length = 0;
+    await readd();
+    assert.equal(prompts(), 1, 'a newly detected configuration offers to build');
+
+    messages.length = 0;
+    nextInfoChoice = "Don't ask again";
+    await readd();
+    assert.equal(prompts(), 1, 'the prompt is shown, and this time dismissed for good');
+    assert.equal(stored.get('cheDevcontainer.startPromptDismissed'), true);
+
+    messages.length = 0;
+    nextInfoChoice = undefined;
+    await readd();
+    assert.equal(prompts(), 0, 'dismissal persists across later detections');
   } finally { for (const subscription of subscriptions) subscription.dispose(); }
 });
