@@ -22,31 +22,35 @@ The parent directory is created with mode 0700. Keep the file outside the reposi
   "workspaceFolder": "/workspace",
   "shell": "bash",
   "remoteEnv": {},
-  "fingerprint": "lowercase-hex-sha256-of-the-config-file",
-  "configPath": "/projects/example/.devcontainer/devcontainer.json"
+  "fingerprint": "lowercase-hex-sha256-of-the-resolved-configuration",
+  "configPath": "/projects/example/.devcontainer/devcontainer.json",
+  "configFileFingerprint": "lowercase-hex-sha256-of-the-raw-config-file"
 }
 ```
 
-`fingerprint` is the lowercase hex SHA-256 of the UTF-8 bytes of the config file setup used.
-Discovery order (first readable file wins; both sides must use the same file):
+`fingerprint` is the lowercase hex SHA-256 of the resolved configuration JSON used by
+setup. It retains its existing role in setup's reuse decision and container label; the extension
+does not compare it with file contents.
 
-1. `.devcontainer.json` at the workspace folder root
-2. `.devcontainer/devcontainer.json`
-3. `.devcontainer/*/devcontainer.json` (sorted by absolute path)
+`configPath` is the absolute path reported by `configuration.configFilePath.fsPath` in
+`devcontainer read-configuration`. If CLI resolution fails, setup uses the file its fallback
+parser read. The extension does not repeat discovery.
 
-In the setup script this is `sha256sum "$CONFIG_FILE" | cut -d' ' -f1` — the **raw bytes of the
-config file**, not the resolved configuration from `devcontainer read-configuration`. Hashing the
-resolved config instead makes every freshly built container look permanently stale.
+`configFileFingerprint` is the lowercase hex SHA-256 of the **raw bytes** of `configPath`,
+computed by setup with `sha256sum`. The extension compares the current bytes of that exact file
+with this value. The resolved configuration and raw file usually have different hashes.
 
-`configPath` is the absolute path of that same file, and it is what makes staleness detectable.
-The extension reports **stale** only when `configPath` is present and hashing that exact file now
-gives something other than `fingerprint`. Without `configPath` a running container is reported
-**ready**: a mismatch against a file the extension found on its own is not evidence the config
-changed — the two sides may simply have hashed different things, and a working container must not
-be labelled out of date on a guess.
+Publish `configPath` and `configFileFingerprint` together, only when both are available.
+For a verified running container, a missing or incomplete pair, or an unreadable/deleted file,
+means **Ready**: staleness cannot be proven. Present fields must be non-empty strings without
+NUL characters; malformed fields invalidate the description and show **Not started**.
+Older scripts that omit both fields remain supported.
 
-So stale detection is opt-in from the setup side. Until setup publishes `configPath`, editing
-`devcontainer.json` will not be flagged.
+**Config changed** tracks only the selected `devcontainer.json` (or `.devcontainer.json`).
+Editing a Dockerfile or referenced compose file, or an external image/feature changing without
+an edit to the config file, does not trigger this UI state. Editing a feature version inside
+`devcontainer.json` does trigger it. Setup's existing resolved-config reuse check is unchanged;
+this file comparison does not add dependency tracking to that check.
 
 These are the script's resolved values, including the detected shell fallback and environment
 passed to lifecycle commands. An empty remoteUser means use the container's default user.

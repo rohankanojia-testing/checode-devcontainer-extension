@@ -44,6 +44,8 @@ export interface RuntimeDescription {
   fingerprint: string;
   /** Absolute path of the config file setup hashed. Optional for older descriptions. */
   configPath?: string;
+  /** SHA-256 of the raw bytes of `configPath`. Optional for older setup scripts. */
+  configFileFingerprint?: string;
 }
 
 /** Lowercase hex SHA-256 of the UTF-8 bytes of the config file setup resolved. */
@@ -55,7 +57,7 @@ export function fingerprintOfContents(contents: string): string {
 export function fingerprintFromFiles(paths: string[]): string | undefined {
   for (const filePath of paths) {
     try {
-      return fingerprintOfContents(fs.readFileSync(filePath, 'utf8'));
+      return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
     } catch {
       continue;
     }
@@ -90,6 +92,8 @@ function runtimeEquals(a: RuntimeDescription | undefined, b: RuntimeDescription 
     a.workspaceFolder === b.workspaceFolder &&
     a.shell === b.shell &&
     a.fingerprint === b.fingerprint &&
+    a.configPath === b.configPath &&
+    a.configFileFingerprint === b.configFileFingerprint &&
     envEquals(a.remoteEnv, b.remoteEnv)
   );
 }
@@ -108,9 +112,15 @@ export function readRuntime(path: string): RuntimeDescription | undefined {
       if (typeof value[key] !== 'string' || !value[key] || value[key].includes('\0')) return undefined;
     }
     if (typeof value.remoteUser !== 'string' || value.remoteUser.includes('\0')) return undefined;
-    if (value.configPath !== undefined &&
-        (typeof value.configPath !== 'string' || !value.configPath || value.configPath.includes('\0'))) {
-      return undefined;
+    for (const key of ['configPath', 'configFileFingerprint']) {
+      if (value[key] !== undefined &&
+          (typeof value[key] !== 'string' || !value[key] || value[key].includes('\0'))) {
+        return undefined;
+      }
+    }
+    if (value.configPath === undefined || value.configFileFingerprint === undefined) {
+      delete value.configPath;
+      delete value.configFileFingerprint;
     }
     if (!value.remoteEnv || typeof value.remoteEnv !== 'object' || Array.isArray(value.remoteEnv)) return undefined;
     for (const [key, entry] of Object.entries(value.remoteEnv)) {
@@ -179,14 +189,13 @@ export async function probe(
     }
     if (buildInFlight(lockPath)) return { phase: 'building', containerName };
     if (JSON.stringify(readRuntime(runtimePath)) !== JSON.stringify(runtime)) return { phase: 'none', containerName };
-    // Staleness is only claimed when it can be PROVEN: setup must have recorded which file it
-    // hashed, and that same file must now hash differently. A mismatch against a file the
-    // extension picked by its own discovery is not evidence the config changed — it is equally
-    // likely the two sides hashed different things, and a running container must not be labelled
-    // out of date on a guess. Without `configPath`, report ready.
-    const expected = runtime.configPath ? fingerprintFromFiles([runtime.configPath]) : undefined;
-    const provablyStale =
-      runtime.configPath !== undefined && expected !== undefined && expected !== runtime.fingerprint;
+    // `fingerprint` hashes the resolved configuration for the script's rebuild logic.
+    // Only prove staleness by comparing raw bytes of the same file setup recorded.
+    // Older scripts, incomplete pairs and unreadable files cannot prove a change.
+    const recorded = runtime.configPath && runtime.configFileFingerprint
+      ? runtime.configFileFingerprint : undefined;
+    const expected = recorded ? fingerprintFromFiles([runtime.configPath!]) : undefined;
+    const provablyStale = recorded !== undefined && expected !== undefined && expected !== recorded;
     return {
       phase: provablyStale ? 'stale' : 'ready',
       containerName,

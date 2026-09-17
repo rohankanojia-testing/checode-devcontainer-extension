@@ -87,7 +87,7 @@ test('runtime description gates readiness on schema, successful publication and 
     const cfgFile = path.join(dir, 'devcontainer.json');
     fs.writeFileSync(cfgFile, '{"image":"alpine"}');
     const hashOf = f => createHash('sha256').update(fs.readFileSync(f, 'utf8'), 'utf8').digest('hex');
-    publish({ ...runtime, configPath: cfgFile, fingerprint: hashOf(cfgFile) });
+    publish({ ...runtime, configPath: cfgFile, configFileFingerprint: hashOf(cfgFile) });
     assert.equal((await check()).phase, 'ready');
     fs.writeFileSync(cfgFile, '{"image":"alpine:3.20"}');   // edited after the build
     assert.equal((await check()).phase, 'stale');
@@ -128,7 +128,7 @@ test('configPath in the runtime description decides staleness, not the caller di
 
   // the description records the file it hashed, and it still matches -> ready, even though the
   // caller passes the fingerprint of a completely different file
-  write({ fingerprint: hashOf(configPath), configPath });
+  write({ fingerprint: 'resolved-config-hash', configFileFingerprint: hashOf(configPath), configPath });
   assert.equal(readRuntime(runtimePath).configPath, configPath);
   assert.equal(fingerprintFromFiles([configPath]), hashOf(configPath));
 
@@ -247,5 +247,64 @@ process.stdout.write(JSON.stringify([{ Id: 'id-1', State: { Running: true } }]))
 process.stdout.write(JSON.stringify([{ Id: 'id-1', State: { Running: true } }]));
 `, { mode: 0o700 });
     assert.equal((await probe('devcontainer', lockPath, runtimePath)).phase, 'ready');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('raw-file contract keeps differing resolved fingerprints ready and proves only file edits stale', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-contract-'));
+  try {
+    const configPath = path.join(dir, 'devcontainer.json');
+    const runtimePath = path.join(dir, 'runtime.json');
+    const lockPath = path.join(dir, 'lock');
+    const engine = path.join(dir, 'podman');
+    fs.writeFileSync(engine, `#!${process.execPath}\nprocess.stdout.write(JSON.stringify([{ Id: 'id', State: { Running: true } }]));\n`, { mode: 0o700 });
+    fs.writeFileSync(configPath, '{"image":"alpine"}\n');
+    const configFileFingerprint = fingerprintFromFiles([configPath]);
+    const runtime = { version: 1, containerName: 'custom', containerId: 'id', podmanPath: engine,
+      image: 'img', remoteUser: 'node', workspaceFolder: '/ws', shell: '/bin/sh', remoteEnv: {},
+      fingerprint: fingerprintOfContents('{"resolved":true}') };
+    const publish = extra => fs.writeFileSync(runtimePath, JSON.stringify({ ...runtime, ...extra }));
+    const check = () => probe('devcontainer', lockPath, runtimePath);
+    assert.notEqual(runtime.fingerprint, configFileFingerprint);
+    publish({ configPath, configFileFingerprint });
+    assert.equal((await check()).phase, 'ready', 'resolved fingerprint differs but raw bytes match');
+    fs.writeFileSync(configPath, '{"image":"alpine:3.20"}\n');
+    const firstEdit = await check();
+    assert.equal(firstEdit.phase, 'stale');
+    fs.writeFileSync(configPath, '{"image":"alpine:3.21"}\n');
+    const secondEdit = await check();
+    assert.equal(secondEdit.phase, 'stale');
+    assert.notEqual(secondEdit.expected, firstEdit.expected);
+    publish({ configPath, configFileFingerprint: fingerprintFromFiles([configPath]) });
+    for (let i = 0; i < 3; i++) assert.equal((await check()).phase, 'ready', 'republished hash remains ready');
+    for (const pair of [{ configPath }, { configFileFingerprint }, {}]) {
+      publish(pair);
+      assert.equal((await check()).phase, 'ready', 'incomplete/absent pair cannot prove staleness');
+      assert.equal(readRuntime(runtimePath).configPath, undefined);
+      assert.equal(readRuntime(runtimePath).configFileFingerprint, undefined);
+    }
+    publish({ configPath, configFileFingerprint });
+    fs.rmSync(configPath);
+    assert.equal((await check()).phase, 'ready', 'deleted file cannot prove staleness');
+    fs.mkdirSync(configPath);
+    assert.equal((await check()).phase, 'ready', 'unreadable file cannot prove staleness');
+    for (const key of ['configPath', 'configFileFingerprint']) {
+      for (const bad of ['', null, 7, 'bad\0value']) {
+        publish({ configPath, configFileFingerprint, [key]: bad });
+        assert.equal(readRuntime(runtimePath), undefined);
+        assert.equal((await check()).phase, 'none', 'malformed pair is Not started');
+      }
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('file fingerprint hashes raw bytes without UTF-8 replacement', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-bytes-'));
+  try {
+    const file = path.join(dir, 'devcontainer.json');
+    const bytes = Buffer.from([0xff, 0xfe, 0x0a]);
+    fs.writeFileSync(file, bytes);
+    assert.equal(fingerprintFromFiles([file]), createHash('sha256').update(bytes).digest('hex'));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
