@@ -67,6 +67,16 @@
         "command": "che-devcontainer.showLog",
         "title": "Show Dev Container Log",
         "category": "Dev Container"
+      },
+      {
+        "command": "che-devcontainer.recommendExtensions",
+        "title": "Recommend Extensions from Dev Container",
+        "category": "Dev Container"
+      },
+      {
+        "command": "che-devcontainer.showExtensionLog",
+        "title": "Show Extension Log",
+        "category": "Dev Container"
       }
     ],
     "terminal": {
@@ -140,6 +150,14 @@
         {
           "command": "che-devcontainer.start",
           "when": "cheDevcontainer.hasConfiguration && cheDevcontainer.state != ready && cheDevcontainer.state != building"
+        },
+        {
+          "command": "che-devcontainer.recommendExtensions",
+          "when": "cheDevcontainer.hasConfiguration"
+        },
+        {
+          "command": "che-devcontainer.showExtensionLog",
+          "when": "cheDevcontainer.hasConfiguration"
         }
       ]
     },

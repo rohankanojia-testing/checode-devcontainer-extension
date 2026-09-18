@@ -67,6 +67,7 @@ function harness(options = {}) {
     },
     window: {
       createStatusBarItem: () => status,
+      createOutputChannel: () => ({ appendLine() {}, show() {}, dispose() {} }),
       registerTerminalProfileProvider: () => disposable,
       showInformationMessage: async (message, ...choices) => {
         messages.push(message);
@@ -156,6 +157,8 @@ function harness(options = {}) {
     await state.flush();
   };
   state.recommendations = () => messages.filter(m => m.startsWith(PROMPT_PREFIX));
+  /** Invoke a contributed command the way the Command Palette would. */
+  state.run = (id, ...args) => commands.get(id)(...args);
   return state;
 }
 
@@ -272,4 +275,49 @@ test('the notify setting governs this prompt too, and a container asking for not
     await empty.ready(undefined, 1); // an older setup script publishes no `extensions` at all
     assert.deepEqual(empty.recommendations(), []);
   } finally { empty.dispose(); }
+});
+
+test('the palette command asks again even after the prompt was dismissed', async () => {
+  const h = harness({ respond: () => "Don't ask again" });
+  try {
+    await h.ready(['twxs.cmake']);
+    assert.equal(h.recommendations().length, 1);
+    assert.equal(h.stored.get('cheDevcontainer.extensionsPromptDismissed'), true);
+
+    // The automatic offer stays quiet — that is what dismissal means.
+    await h.poll();
+    assert.equal(h.recommendations().length, 1);
+
+    // Asking explicitly is not the same as being asked: the dismissal and the once-per-window
+    // record are both bypassed, or the command would appear broken to the user who ran it.
+    h.respond = () => undefined;
+    await h.run('che-devcontainer.recommendExtensions');
+    await h.flush();
+    assert.equal(h.recommendations().length, 2);
+  } finally { h.dispose(); }
+});
+
+test('the palette command says so rather than going quiet when there is nothing to offer', async () => {
+  const h = harness({ installed: ['twxs.cmake'] });
+  try {
+    await h.ready(['twxs.cmake']);
+    assert.deepEqual(h.recommendations(), [], 'nothing missing, so no automatic prompt');
+    await h.run('che-devcontainer.recommendExtensions');
+    await h.flush();
+    assert.ok(h.messages.includes('All recommended extensions are already installed.'));
+
+    await h.ready([], 1);
+    await h.run('che-devcontainer.recommendExtensions');
+    await h.flush();
+    assert.ok(h.messages.includes('This dev container recommends no extensions.'));
+  } finally { h.dispose(); }
+});
+
+test('the palette command reports a container that is not running', async () => {
+  const h = harness();
+  try {
+    await h.run('che-devcontainer.recommendExtensions');
+    await h.flush();
+    assert.ok(h.messages.some(m => /not running/.test(m)));
+  } finally { h.dispose(); }
 });

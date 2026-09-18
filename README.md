@@ -71,6 +71,10 @@ installed, taken from the built image's merged metadata so a Feature's contribut
 alongside the repository's own list. Nothing is installed without being asked, and ids Open VSX
 does not carry are named rather than failing silently.
 
+**Dev Container: Recommend Extensions** runs that offer on demand, ignoring the once-per-window
+and "don't ask again" gates, and **Dev Container: Show Extension Log** opens the extension's own
+log, which records every state transition and every reason it decided to stay quiet.
+
 The contract with the script — runtime JSON, lock file, config fingerprint — is documented in
 [docs/script-integration.md](docs/script-integration.md). The extension cannot start a container
 on its own, so review it alongside the `start-devcontainer.sh` change that publishes

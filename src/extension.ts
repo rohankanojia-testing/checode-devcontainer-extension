@@ -99,6 +99,20 @@ function closeContainerTerminals(): void {
   containerTerminals.clear();
 }
 
+/**
+ * The extension's own log.
+ *
+ * Everything this extension does happens in response to something it cannot show the user: a file
+ * appearing in /tmp, a container's inspect output, a task ending. Without a log, diagnosing "no
+ * notification appeared" means reading compiled JavaScript in a running workspace — so every
+ * state transition and every silent early return is written here instead.
+ */
+let output: vscode.OutputChannel | undefined;
+
+function trace(message: string): void {
+  output?.appendLine(`${new Date().toISOString()} ${message}`);
+}
+
 /** Build tasks this window has running. Makes `building` work without any script cooperation. */
 let activeBuilds = 0;
 const BUILD_TASKS = new Set([TASK_START, TASK_REBUILD, TASK_REBUILD_NO_CACHE]);
@@ -296,6 +310,9 @@ async function showActions(): Promise<void> {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  output = vscode.window.createOutputChannel('Dev Container');
+  context.subscriptions.push(output);
+  trace('extension activated');
   extensionsOffered.clear(); // prompts are per window, and so is this record of them
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   context.subscriptions.push(statusBar);
@@ -342,7 +359,20 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('che-devcontainer.rebuildNoCache', () =>
       runDevfileTask(TASK_REBUILD_NO_CACHE)
     ),
-    vscode.commands.registerCommand('che-devcontainer.showLog', () => runDevfileTask(TASK_SHOW_LOG))
+    vscode.commands.registerCommand('che-devcontainer.showLog', () => runDevfileTask(TASK_SHOW_LOG)),
+    // On demand, because the automatic offer happens on a state transition the user may not have
+    // been watching — and "did it decide not to, or did it never run?" is otherwise unanswerable
+    // without reading compiled JavaScript in a running workspace.
+    vscode.commands.registerCommand('che-devcontainer.recommendExtensions', async () => {
+      if (!await requireConfiguration()) return;
+      const runtime = current?.runtime;
+      if (!runtime) {
+        vscode.window.showWarningMessage('Dev container is not running, so there is nothing to recommend yet.');
+        return;
+      }
+      await offerExtensions(context, runtime, true);
+    }),
+    vscode.commands.registerCommand('che-devcontainer.showExtensionLog', () => output?.show(true))
   );
 
   // Setup resolves terminal configuration; the probe verifies container identity and liveness.
@@ -383,6 +413,11 @@ export function activate(context: vscode.ExtensionContext): void {
     if (probeEquals(next, current)) {
       return;
     }
+    trace(
+      `state ${current?.phase ?? 'unknown'} -> ${next.phase}` +
+      ` (runtime=${next.runtime ? 'yes' : 'no'}` +
+      ` extensions=${next.runtime?.extensions?.length ?? 0} builds=${activeBuilds})`
+    );
     current = next;
     void vscode.commands.executeCommand('setContext', 'cheDevcontainer.state', current.phase);
     render(current);
@@ -485,21 +520,44 @@ const extensionsOffered = new Set<string>();
  * devcontainer asks for. Installing quietly would leave a developer with a working container and
  * no toolchain, and nothing saying why. So: say what was asked for, say what happened.
  */
-async function offerExtensions(context: vscode.ExtensionContext, runtime: RuntimeDescription): Promise<void> {
+async function offerExtensions(
+  context: vscode.ExtensionContext,
+  runtime: RuntimeDescription,
+  /** The user asked for this explicitly, so the once-per-window gates do not apply. */
+  requested = false
+): Promise<void> {
   const wanted = runtime.extensions ?? [];
-  if (wanted.length === 0) return;
+  if (wanted.length === 0) {
+    trace('offer: the container asks for no extensions');
+    if (requested) void vscode.window.showInformationMessage('This dev container recommends no extensions.');
+    return;
+  }
   // `cfg` is local to activate(); this runs at module scope, so read the configuration directly.
-  if (!vscode.workspace.getConfiguration('cheDevcontainer').get<boolean>('notify', true)) return;
-  if (context.workspaceState.get<boolean>(EXTENSIONS_DISMISSED_KEY)) return;
+  if (!requested && !vscode.workspace.getConfiguration('cheDevcontainer').get<boolean>('notify', true)) {
+    trace('offer: suppressed by cheDevcontainer.notify');
+    return;
+  }
+  if (!requested && context.workspaceState.get<boolean>(EXTENSIONS_DISMISSED_KEY)) {
+    trace('offer: dismissed for this workspace');
+    return;
+  }
 
   // Only those not already present. `getExtension` covers built-ins and anything the user added.
   const missing = wanted.filter(id => !vscode.extensions.getExtension(id));
-  if (missing.length === 0) return;
+  if (missing.length === 0) {
+    trace(`offer: all ${wanted.length} already installed`);
+    if (requested) void vscode.window.showInformationMessage('All recommended extensions are already installed.');
+    return;
+  }
 
   // Ask again only when the container wants something that has not been raised yet — a rebuild
   // that adds an extension is worth a prompt, the same list on the next poll is not.
-  if (missing.every(id => extensionsOffered.has(id))) return;
+  if (!requested && missing.every(id => extensionsOffered.has(id))) {
+    trace(`offer: already offered ${missing.join(', ')}`);
+    return;
+  }
   for (const id of missing) extensionsOffered.add(id);
+  trace(`offer: prompting for ${missing.join(', ')}`);
 
   // che-code is a VS Code fork; probe rather than assume the install command exists, so the
   // button is never offered when pressing it would do nothing.
@@ -515,6 +573,7 @@ async function offerExtensions(context: vscode.ExtensionContext, runtime: Runtim
     ...choices
   );
 
+  trace(`offer: user chose ${choice ?? 'nothing'}`);
   if (choice === never) {
     await context.workspaceState.update(EXTENSIONS_DISMISSED_KEY, true);
     return;

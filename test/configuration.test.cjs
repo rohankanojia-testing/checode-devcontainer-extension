@@ -59,6 +59,7 @@ test('configuration presence gates UI, probing and explicit actions across file 
     },
     window: {
       createStatusBarItem: () => status,
+      createOutputChannel: () => ({ appendLine() {}, show() {}, dispose() {} }),
       registerTerminalProfileProvider: (_id, provider) => { profile = provider; return disposable; },
       showInformationMessage: async message => { messages.push(message); return nextInfoChoice; },
       showWarningMessage: async message => { messages.push(message); },
