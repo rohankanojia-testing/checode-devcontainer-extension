@@ -106,6 +106,10 @@ const BUILD_TASKS = new Set([TASK_START, TASK_REBUILD, TASK_REBUILD_NO_CACHE]);
 /** EX_CONFIG from start-devcontainer.sh: the environment cannot support nested containers. */
 const EXIT_UNSUPPORTED_ENVIRONMENT = 78;
 
+/** Probed at runtime rather than assumed — che-code is a fork and may not contribute these. */
+const INSTALL_COMMAND = 'workbench.extensions.installExtension';
+const SEARCH_COMMAND = 'workbench.extensions.search';
+
 /**
  * Status bar backgrounds are restricted to these two theme colours — `extHostStatusBar.ts` keeps
  * an allow-list and silently drops anything else, so no third colour is available.
@@ -292,6 +296,7 @@ async function showActions(): Promise<void> {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  extensionsOffered.clear(); // prompts are per window, and so is this record of them
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   context.subscriptions.push(statusBar);
 
@@ -383,6 +388,9 @@ export function activate(context: vscode.ExtensionContext): void {
     render(current);
     void notify(current);
     if (added) void offerToStart(context);
+    // Extensions are offered once the container exists, not when the config appears: the ids come
+    // from the built image's metadata, so before a build there is nothing to recommend.
+    if (current.runtime) void offerExtensions(context, current.runtime);
   };
 
   // A build we started (or the user started from the task list) is observable through task
@@ -458,6 +466,93 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 const DISMISSED_KEY = 'cheDevcontainer.startPromptDismissed';
+const EXTENSIONS_DISMISSED_KEY = 'cheDevcontainer.extensionsPromptDismissed';
+
+/**
+ * Ids already offered in this window, so the five-second poll does not re-prompt.
+ *
+ * A set of ids rather than one joined key, because an extension that fails to install stays
+ * missing: keyed on the whole list, the next poll would see a shorter list, call it new, and ask
+ * again — every five seconds, for extensions that are simply not in this editor's registry.
+ */
+const extensionsOffered = new Set<string>();
+
+/**
+ * Offer the extensions the dev container asks for.
+ *
+ * Recommend rather than install silently. Che's editor is wired to Open VSX, which does not carry
+ * every Marketplace extension — `ms-vscode.cpptools` is absent, and it is exactly what a C++
+ * devcontainer asks for. Installing quietly would leave a developer with a working container and
+ * no toolchain, and nothing saying why. So: say what was asked for, say what happened.
+ */
+async function offerExtensions(context: vscode.ExtensionContext, runtime: RuntimeDescription): Promise<void> {
+  const wanted = runtime.extensions ?? [];
+  if (wanted.length === 0) return;
+  // `cfg` is local to activate(); this runs at module scope, so read the configuration directly.
+  if (!vscode.workspace.getConfiguration('cheDevcontainer').get<boolean>('notify', true)) return;
+  if (context.workspaceState.get<boolean>(EXTENSIONS_DISMISSED_KEY)) return;
+
+  // Only those not already present. `getExtension` covers built-ins and anything the user added.
+  const missing = wanted.filter(id => !vscode.extensions.getExtension(id));
+  if (missing.length === 0) return;
+
+  // Ask again only when the container wants something that has not been raised yet — a rebuild
+  // that adds an extension is worth a prompt, the same list on the next poll is not.
+  if (missing.every(id => extensionsOffered.has(id))) return;
+  for (const id of missing) extensionsOffered.add(id);
+
+  // che-code is a VS Code fork; probe rather than assume the install command exists, so the
+  // button is never offered when pressing it would do nothing.
+  const commands = await vscode.commands.getCommands(true);
+  const canInstall = commands.includes(INSTALL_COMMAND);
+
+  const install = 'Install';
+  const show = 'Show';
+  const never = "Don't ask again";
+  const choices = canInstall ? [install, show, never] : [show, never];
+  const choice = await vscode.window.showInformationMessage(
+    `Dev container recommends ${missing.length} extension${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`,
+    ...choices
+  );
+
+  if (choice === never) {
+    await context.workspaceState.update(EXTENSIONS_DISMISSED_KEY, true);
+    return;
+  }
+  if (choice === show) {
+    await revealExtensions(missing, commands);
+    return;
+  }
+  if (choice !== install) return;
+
+  const failed: string[] = [];
+  for (const id of missing) {
+    try {
+      await vscode.commands.executeCommand(INSTALL_COMMAND, id);
+    } catch {
+      failed.push(id);
+    }
+  }
+  const installed = missing.length - failed.length;
+  if (failed.length === 0) {
+    void vscode.window.showInformationMessage(`Installed ${installed} extension${installed === 1 ? '' : 's'}.`);
+  } else {
+    // Naming the registry matters: "not found" reads as a bug, "not on Open VSX" reads as a
+    // licensing fact the user can act on.
+    void vscode.window.showWarningMessage(
+      `Installed ${installed} of ${missing.length}. Not available in this editor's registry: ${failed.join(', ')}.`
+    );
+  }
+}
+
+/** Open the extensions view on the given ids, degrading to a plain list when it cannot. */
+async function revealExtensions(ids: string[], commands: string[]): Promise<void> {
+  if (commands.includes(SEARCH_COMMAND)) {
+    await vscode.commands.executeCommand(SEARCH_COMMAND, ids.map(id => `@id:${id}`).join(' '));
+    return;
+  }
+  void vscode.window.showInformationMessage(`Recommended extensions: ${ids.join(', ')}`);
+}
 
 /**
  * The devfile has no postStart event: nothing builds the environment on its own. Ask once, rather

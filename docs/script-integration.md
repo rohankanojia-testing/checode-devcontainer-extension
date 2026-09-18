@@ -24,7 +24,8 @@ The parent directory is created with mode 0700. Keep the file outside the reposi
   "remoteEnv": {},
   "fingerprint": "lowercase-hex-sha256-of-the-resolved-configuration",
   "configPath": "/projects/example/.devcontainer/devcontainer.json",
-  "configFileFingerprint": "lowercase-hex-sha256-of-the-raw-config-file"
+  "configFileFingerprint": "lowercase-hex-sha256-of-the-raw-config-file",
+  "extensions": ["dbaeumer.vscode-eslint", "streetsidesoftware.code-spell-checker"]
 }
 ```
 
@@ -45,6 +46,18 @@ For a verified running container, a missing or incomplete pair, or an unreadable
 means **Ready**: staleness cannot be proven. Present fields must be non-empty strings without
 NUL characters; malformed fields invalidate the description and show **Not started**.
 Older scripts that omit both fields remain supported.
+
+`extensions` is optional: the extension ids from the merged `customizations.vscode.extensions`.
+Read them from the `devcontainer.metadata` label of the **built image**, not from
+`devcontainer.json` — Features contribute extensions the repository never names, and the label is
+the only place the merged list exists locally. Omit the field when the list is empty. Ids must be
+non-empty strings without NUL characters; anything else invalidates the whole description, so
+filter non-strings out rather than publishing them.
+
+The extension recommends these once per window, filtering out ids already installed, and never
+installs without being asked. che-code resolves extensions through Open VSX, which does not carry
+every Marketplace extension (`ms-vscode.cpptools` is absent, and a C++ devcontainer asks for it),
+so an install can legitimately fail for reasons the setup script cannot see.
 
 **Config changed** tracks only the selected `devcontainer.json` (or `.devcontainer.json`).
 Editing a Dockerfile or referenced compose file, or an external image/feature changing without

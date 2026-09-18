@@ -46,6 +46,12 @@ export interface RuntimeDescription {
   configPath?: string;
   /** SHA-256 of the raw bytes of `configPath`. Optional for older setup scripts. */
   configFileFingerprint?: string;
+  /**
+   * Extension ids from the merged `customizations.vscode.extensions`, as setup read them from
+   * the built image's `devcontainer.metadata` label. The label is used rather than
+   * devcontainer.json because Features contribute extensions the repository never names.
+   */
+  extensions?: string[];
 }
 
 /** Lowercase hex SHA-256 of the UTF-8 bytes of the config file setup resolved. */
@@ -94,8 +100,15 @@ function runtimeEquals(a: RuntimeDescription | undefined, b: RuntimeDescription 
     a.fingerprint === b.fingerprint &&
     a.configPath === b.configPath &&
     a.configFileFingerprint === b.configFileFingerprint &&
+    listEquals(a.extensions, b.extensions) &&
     envEquals(a.remoteEnv, b.remoteEnv)
   );
+}
+
+function listEquals(a: string[] | undefined, b: string[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((value, i) => value === b[i]);
 }
 
 function envEquals(a: Record<string, string>, b: Record<string, string>): boolean {
@@ -121,6 +134,12 @@ export function readRuntime(path: string): RuntimeDescription | undefined {
     if (value.configPath === undefined || value.configFileFingerprint === undefined) {
       delete value.configPath;
       delete value.configFileFingerprint;
+    }
+    if (value.extensions !== undefined) {
+      if (!Array.isArray(value.extensions)) return undefined;
+      for (const id of value.extensions) {
+        if (typeof id !== 'string' || !id || id.includes('\0')) return undefined;
+      }
     }
     if (!value.remoteEnv || typeof value.remoteEnv !== 'object' || Array.isArray(value.remoteEnv)) return undefined;
     for (const [key, entry] of Object.entries(value.remoteEnv)) {

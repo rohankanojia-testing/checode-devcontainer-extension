@@ -66,6 +66,11 @@ Clicking it opens every action in one menu: **Open Terminal in Dev Container**, 
 reimplementing them. A `devcontainer` terminal profile is also registered; regular new terminals
 stay in the outer workspace container.
 
+Extensions the dev container asks for are offered once per window: the ones not already
+installed, taken from the built image's merged metadata so a Feature's contributions are included
+alongside the repository's own list. Nothing is installed without being asked, and ids Open VSX
+does not carry are named rather than failing silently.
+
 The contract with the script — runtime JSON, lock file, config fingerprint — is documented in
 [docs/script-integration.md](docs/script-integration.md). The extension cannot start a container
 on its own, so review it alongside the `start-devcontainer.sh` change that publishes
@@ -73,7 +78,6 @@ on its own, so review it alongside the `start-devcontainer.sh` change that publi
 
 ## Not implemented yet
 
-- Installing the extensions `devcontainer.json` asks for (they surface as recommendations)
 - Applying its `settings` block (currently written at machine scope, so user settings win)
 - Any `devcontainer.json` parsing — deliberately left to `@devcontainers/cli` in the script
 
